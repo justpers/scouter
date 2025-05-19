@@ -22,7 +22,7 @@ class SlotAttention(nn.Module):
 
         mu = slots_mu.expand(1, self.num_slots, -1)
         sigma = slots_sigma.expand(1, self.num_slots, -1)
-        self.initial_slots = nn.Parameter(torch.normal(mu, sigma))
+        self.initial_slots = nn.Parameter(torch.normal(mu, sigma.abs()))
 
         self.to_q = nn.Sequential(
             nn.Linear(dim, dim),
