@@ -206,12 +206,12 @@ def main(args):
 
 def param_translation(args):
     args_dict = vars(args)
-    args_for_evaluation = ['num_classes', 'lambda_value', 'power', 'slots_per_class']
-    args_type = [int, float, int, int]
+    args_for_evaluation = ['num_classes', 'lambda_value', 'power', 'slots_per_class', 'hidden_dim']
+    args_type = [int, float, int, int, int]
     target_arg = None
 
     for arg_id, arg in enumerate(args_for_evaluation):
-        # 🔧 str인지 확인 후 find 사용 (형변환 보장)
+        # str인지 확인 후 find 사용 (형변환 보장)
         if isinstance(args_dict[arg], str) and ',' in args_dict[arg]:
             target_arg = arg
             target_type = args_type[arg_id]
