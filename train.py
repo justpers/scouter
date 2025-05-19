@@ -209,24 +209,30 @@ def param_translation(args):
     args_for_evaluation = ['num_classes', 'lambda_value', 'power', 'slots_per_class']
     args_type = [int, float, int, int]
     target_arg = None
+
     for arg_id, arg in enumerate(args_for_evaluation):
-        if args_dict[arg].find(',') > 0:
+        # 🔧 str인지 확인 후 find 사용 (형변환 보장)
+        if isinstance(args_dict[arg], str) and ',' in args_dict[arg]:
             target_arg = arg
             target_type = args_type[arg_id]
             setting_list = args_dict[arg].split(",")
         else:
-            args_dict[arg] = args_type[arg_id](args_dict[arg])
+            try:
+                args_dict[arg] = args_type[arg_id](args_dict[arg])
+            except Exception as e:
+                raise ValueError(f"Invalid value for argument '{arg}': {args_dict[arg]} → {e}")
 
     if target_arg is None:
         main(args)
     else:
         record = {}
         circle_turns = args.iterated_evaluation_num
-        for set in setting_list:
-            record.update({f"{target_arg}-"+set: []})
-            args_dict[target_arg] = target_type(set)
+        for set_val in setting_list:
+            record_key = f"{target_arg}-{set_val}"
+            record[record_key] = []
+            args_dict[target_arg] = target_type(set_val)
             for turn in range(circle_turns):
-                record[f"{target_arg}-"+set].append(main(args))
+                record[record_key].append(main(args))
                 print(record)
 
 
