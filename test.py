@@ -94,7 +94,7 @@ def main():
     elif args.dataset == 'MNIST':
         dataset_val = datasets.MNIST('./data/mnist', train=False, transform=transform)
         data_loader_val = torch.utils.data.DataLoader(dataset_val, args.batch_size, shuffle=False, num_workers=1, pin_memory=True)
-        image = iter(data_loader_val).next()[0][0]
+        image = next(iter(data_loader_val))[0][0]
         label = ''
         image_orl = Image.fromarray((image.cpu().detach().numpy()*255).astype(np.uint8)[0], mode='L')
         image = transform(image_orl)
