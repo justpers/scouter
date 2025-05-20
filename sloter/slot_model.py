@@ -19,18 +19,24 @@ def load_backbone(args):
     bone = create_model(
         args.model,
         pretrained=args.pre_trained,
-        num_classes=args.num_classes)
-    if args.dataset == "MNIST":
-        bone.conv1 = nn.Conv2d(1, 64, 3, stride=2, padding=1, bias=False)
-    if args.use_slot:
-        if args.use_pre:
-            checkpoint = torch.load(f"saved_model/{args.dataset}_no_slot_checkpoint.pth")
-            new_state_dict = OrderedDict()
-            for k, v in checkpoint["model"].items():
-                name = k[9:] # remove `backbone.`
+        num_classes=args.num_classes,
+        in_chans=getattr(args, "input_channels", 1))
+    
+    if getattr(args, "input_channels", 1) == 1:
+        bone.conv1 == nn.Conv2d(1, 64, 3, stride=2, padding=1, bias=False)
+
+    if args.use_pre:
+        checkpoint = torch.load(f"saved_model/{args.dataset}_no_slot_checkpoint.pth")
+        new_state_dict = OrderedDict()
+        for k, v in checkpoint["model"].items():
+            name = k[9:]  # remove `backbone.`
+            if name in bone.state_dict() and bone.state_dict()[name].shape == v.shape:
                 new_state_dict[name] = v
-            bone.load_state_dict(new_state_dict)
-            print("load pre dataset parameter over")
+            else:
+                print(f"Skipping: {name} due to shape mismatch")
+                
+        bone.load_state_dict(new_state_dict, strict=False)  # 호환되지 않는 conv1 등 무시
+        print("load pre dataset parameter over")
         if not args.grad:
             if 'seresnet' in args.model:
                 bone.avg_pool = Identical()

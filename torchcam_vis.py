@@ -54,6 +54,8 @@ def make_grad(extractor, output, img_heat, grad_min_level, save_name):
 
 
 def for_vis(args):
+    args.input_channels = 3  # MNIST 3채널이라 수정
+
     transform = transforms.Compose([
         transforms.Resize((args.img_size, args.img_size)),
         transforms.ToTensor(),
@@ -85,10 +87,15 @@ def for_vis(args):
     elif args.dataset == 'MNIST':
         dataset_val = datasets.MNIST('./data/mnist', train=False, transform=transform)
         data_loader_val = torch.utils.data.DataLoader(dataset_val, args.batch_size, shuffle=False, num_workers=1, pin_memory=True)
-        image = next(iter(data_loader_val))[0][0]
-        label = ''
+        image_batch, label_batch = next(iter(data_loader_val))
+        image = image_batch[0]
+        label = label_batch[0].item() # 정수형으로 변환
+        
         image_orl = Image.fromarray((image.cpu().detach().numpy()*255).astype(np.uint8)[0], mode='L')
         image = transform(image_orl)
+
+        if image.shape[0] == 1:
+            image = image.repeat(3, 1, 1)
         transform = transforms.Compose([transforms.Normalize((0.1307,), (0.3081,))])
     # CUB
     elif args.dataset == 'CUB200':
@@ -111,7 +118,16 @@ def for_vis(args):
     model.eval()
 
     image_orl_for_blur = np.float32(image_orl) / 255.
-    img, blurred_img, logitori = Get_blurred_img(image_orl_for_blur, label, model, resize_shape=(260, 260),
+
+    # MNIST grayscale이면 → 3채널로 확장
+    if image_orl_for_blur.ndim == 2:
+        image_orl_for_blur = np.stack([image_orl_for_blur]*3, axis=-1)  # HWC (260, 260, 3)
+
+    # → NCHW 순서로 변환
+    image_orl_for_blur = image_orl_for_blur.transpose(2, 0, 1)  # (3, 260, 260)
+    img_torch = torch.from_numpy(image_orl_for_blur).unsqueeze(0).float().to('cuda')  # (1, 3, 260, 260)
+
+    img, blurred_img, logitori = Get_blurred_img(img_torch, label, model, resize_shape=(260, 260),
                                                     Gaussian_param=[51, 50],
                                                     Median_param=11, blur_type='Gaussian', use_cuda=1)
 
@@ -196,36 +212,39 @@ def for_vis(args):
     model = model.to(device)
     model.eval()
 
-    imagenet_dir = '../../data/imagenet/ILSVRC/Data/CLS-LOC/validation'
-    # Add a Per-Sample Bottleneck at layer conv4_1
-    iba = IBA(model.layer4)
+    if args.dataset != "ImageNet":
+        print("Skkiping IBA: ImageNet validation set not available.")
+    else:
+        imagenet_dir = '../../data/imagenet/ILSVRC/Data/CLS-LOC/validation'
+        # Add a Per-Sample Bottleneck at layer conv4_1
+        iba = IBA(model.layer4)
 
-    # Estimate the mean and variance of the feature map at this layer.
-    val_set = get_imagenet_folder(imagenet_dir)
-    val_loader = DataLoader(val_set, batch_size=64, shuffle=True, num_workers=4)
-    iba.estimate(model, val_loader, n_samples=5000, progbar=True)
+        # Estimate the mean and variance of the feature map at this layer.
+        val_set = get_imagenet_folder(imagenet_dir)
+        val_loader = DataLoader(val_set, batch_size=64, shuffle=True, num_workers=4)
+        iba.estimate(model, val_loader, n_samples=5000, progbar=True)
 
-    for target_index in tqdm(range(0, args.num_classes)):
-        # Closure that returns the loss for one batch
-        model_loss_closure = lambda x: -torch.log_softmax(model(x.to(device)), dim=1)[:, target_index].mean()
-        # Explain class target for the given image
-        saliency_map = iba.analyze(image, model_loss_closure, beta=10)
-        # display result
-        model_loss_closure = lambda x: -torch.log_softmax(model(x.to(device)), 1)[:, target_index].mean()
-        heatmap = iba.analyze(image, model_loss_closure )
+        for target_index in tqdm(range(0, args.num_classes)):
+            # Closure that returns the loss for one batch
+            model_loss_closure = lambda x: -torch.log_softmax(model(x.to(device)), dim=1)[:, target_index].mean()
+            # Explain class target for the given image
+            saliency_map = iba.analyze(image, model_loss_closure, beta=10)
+            # display result
+            model_loss_closure = lambda x: -torch.log_softmax(model(x.to(device)), 1)[:, target_index].mean()
+            heatmap = iba.analyze(image, model_loss_closure )
 
-        mask = heatmap
-        mask = np.maximum(mask, 0)
-        mask = mask - np.min(mask)
-        mask = mask / np.max(mask)
-        mask = np.maximum(mask, args.grad_min_level)
-        mask = mask - np.min(mask)
-        mask = mask / np.max(mask)
+            mask = heatmap
+            mask = np.maximum(mask, 0)
+            mask = mask - np.min(mask)
+            mask = mask / np.max(mask)
+            mask = np.maximum(mask, args.grad_min_level)
+            mask = mask - np.min(mask)
+            mask = mask / np.max(mask)
 
-        image_orl = image_orl.resize((args.img_size, args.img_size), Image.BILINEAR)
-        # heatmap = np.array(heatmap)
-        show_cam_on_image(image_orl, mask, target_index, 'IBA')
-        # plot_saliency_map(heatmap, tensor_to_np_img(image[0]))
+            image_orl = image_orl.resize((args.img_size, args.img_size), Image.BILINEAR)
+            # heatmap = np.array(heatmap)
+            show_cam_on_image(image_orl, mask, target_index, 'IBA')
+            # plot_saliency_map(heatmap, tensor_to_np_img(image[0]))
 
     RESNET_CONFIG = dict(input_layer='conv1', conv_layer='layer4', fc_layer='fc')
 

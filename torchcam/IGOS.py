@@ -167,8 +167,11 @@ def Get_blurred_img(input_img, img_label, model, resize_shape=(224, 224), Gaussi
     # original_img = cv2.imread(input_img, 1)
     # original_img = cv2.resize(original_img, resize_shape)
     # img = np.float32(original_img)# / 255
-    img = np.float32(input_img)# / 255
+    img = np.float32(input_img.cpu().numpy())# / 255
 
+    if img.ndim == 4:  # (1, 3, H, W)
+        img = np.squeeze(img, axis=0)  # (3, H, W)
+        img = np.transpose(img, (1, 2, 0))  # (H, W, C)
 
     if blur_type =='Gaussian':   # Gaussian blur
         Kernelsize = Gaussian_param[0]
@@ -187,7 +190,7 @@ def Get_blurred_img(input_img, img_label, model, resize_shape=(224, 224), Gaussi
         Kernelsize_M = Median_param
         blurred_img2 = np.float32(cv2.medianBlur(original_img, Kernelsize_M)) / 255
 
-        blurred_img = (blurred_img1 + blurred_img2) / 2
+        blurred_img = (np + blurred_img2) / 2
 
     img_torch = preprocess_image(img, use_cuda, require_grad = False)
     blurred_img_torch = preprocess_image(blurred_img, use_cuda, require_grad = False)
