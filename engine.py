@@ -39,17 +39,30 @@ def calculation(model, mode, data_loader, device, record, epoch, optimizer=None)
             optimizer.zero_grad()
 
         logits, loss_list = model(inputs, labels)
-        loss = loss_list[0]
+        # total_loss (slot 쓰든 안 쓰든 loss_list[0] 은 항상 총 loss)
+        total_loss = loss_list[0]
 
         if mode == "train":
-            loss.backward()
+            total_loss.backward()
             optimizer.step()
 
-        a = loss.item()
-        running_loss += a
-        if len(loss_list) > 2:  # For slot training only
-            running_att_loss += loss_list[2].item()
-            running_log_loss += loss_list[1].item()
+        # running loss
+        running_loss += total_loss.item()
+
+        # classification (CE) loss: slot 모드이면 loss_list[1], 아니면 total_loss
+        if len(loss_list) > 1:
+            ce_loss = loss_list[1]
+        else:
+            ce_loss = total_loss
+        running_log_loss += ce_loss.item()
+
+        # attention loss: slot 모드일 때만 loss_list[2], 아니면 0
+        if len(loss_list) > 2:
+            att_loss = loss_list[2]
+        else:
+            att_loss = torch.tensor(0.0, device=device)
+        running_att_loss += att_loss.item()
+
         running_corrects += cal.evaluateTop1(logits, labels)
 
     epoch_loss = round(running_loss / L, 3)
