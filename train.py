@@ -37,6 +37,8 @@ def get_args_parser():
     parser.add_argument('--batch_size',   default=64,   type=int)
     parser.add_argument('--epochs',       default=20,   type=int)
     parser.add_argument('--lr_drop',      default=70,   type=int, help='stepLR drop interval')
+    parser.add_argument('--early_stop_patience', default=5, type=int, help='val AUC 개선이 없으면 몇 epoch 뒤 중단할지')
+    parser.add_argument('--best_ckpt_name', default='best_auc.pth', type=str, help='AUC 최고 모델 저장 파일명')
     # ─── SCOUTER 옵션 ───
     parser.add_argument('--num_classes', default="10", type=str)
     parser.add_argument('--use_slot',     default=True, type=str2bool)
@@ -55,6 +57,7 @@ def get_args_parser():
     parser.add_argument('--vis_id',   default=0,     type=int)
     # ─── 기타 기능 ───
     parser.add_argument('--aug',    default=True,  type=str2bool, help='enable data augmentation')
+    parser.add_argument('--aug_level', default='base', type=str, choices=['base', 'strong'], help='augmentation 강도(base/strong)')
     parser.add_argument('--grad',   default=False, type=str2bool)
     parser.add_argument('--grad_min_level', default=0., type=float)
     parser.add_argument('--cal_area_size', default=False, type=str2bool)
@@ -70,126 +73,128 @@ def get_args_parser():
 
 
 def main(args):
-    # ─── 분산 초기화 ───
+    # ─── 분산/장치 초기화 ────────────────────────────────────────────────
     prt.init_distributed_mode(args)
     device = torch.device(args.device)
 
-    # ─── 모델 생성 & 장치 할당 ───
+    # ─── 모델 생성 ─────────────────────────────────────────────────────
     model = SlotModel(args)
-    print("train model:", 
-          ("use_slot" if args.use_slot else "no_slot"),
-          ("negative_loss" if args.use_slot and args.loss_status != 1 else "positive_loss"))
+    print("train model:",
+          "use slot" if args.use_slot else "without slot",
+          "negative loss" if args.use_slot and args.loss_status != 1 else "positive loss")
     model.to(device)
     model_without_ddp = model
 
-    # freeze
-    if args.freeze_layers > 0:
-        print(f"Freeze first {args.freeze_layers} layers of backbone …")
-        model_without_ddp.dfs_freeze(model_without_ddp.backbone, args.freeze_layers)
-
-        # fc만 unfreeze
-        if hasattr(model_without_ddp.backbone, 'fc'):
-            for p in model_without_ddp.backbone.fc.parameters():
-                p.requires_grad = True
-    
-    if hasattr(model_without_ddp.backbone, 'fc'):
-        fc_params = list(model_without_ddp.backbone.fc.parameters())
-    else:
-        fc_params = []
-
-    # 파라미터 객체 아이디로 필터링 하기 위해 집합 생성
-    fc_params_ids = {id(p) for p in fc_params}
-    other_params = [
-        p for p in model_without_ddp.parameters()
-        if p.requires_grad and id(p) not in fc_params_ids
-    ]
-
-    optimizer = torch.optim.AdamW([
-        {'params': fc_params,     'lr': args.lr_fc},
-        {'params': other_params,  'lr': args.lr},
-    ], weight_decay=args.weight_decay)
-
-    # ─── Scheduler, Criterion ───
-    criterion    = torch.nn.CrossEntropyLoss()
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_drop)
-
-    # ─── 데이터셋/샘플러 불러오기 ───
-    # select_dataset() 는 (train_ds, val_ds, train_sampler) 을 리턴하도록 맞춰 두셔야 합니다
-    dataset_train, dataset_val, sampler_train = select_dataset(args)
-
+    # ─── DDP 설정 ─────────────────────────────────────────────────────
     if args.distributed:
-        train_sampler = sampler_train or DistributedSampler(dataset_train)
-        val_sampler   = DistributedSampler(dataset_val, shuffle=False)
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[args.gpu], find_unused_parameters=True)
+        model_without_ddp = model.module
+
+    # ─── Optimizer / Criterion / Scheduler ────────────────────────────
+    params = [p for p in model_without_ddp.parameters() if p.requires_grad]
+    optimizer     = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    criterion     = torch.nn.CrossEntropyLoss()
+    lr_scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_drop)
+
+    # ─── 데이터셋 & DataLoader ─────────────────────────────────────────
+    dataset_train, dataset_val, sampler_train = select_dataset(args)
+    if args.distributed:
+        sampler_train = DistributedSampler(dataset_train)
+        sampler_val   = DistributedSampler(dataset_val, shuffle=False)
     else:
-        train_sampler = sampler_train
-        val_sampler   = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_val   = torch.utils.data.SequentialSampler(dataset_val)
 
-    # ─── DataLoader 정의 ───
-    data_loader_train = DataLoaderX(
-        dataset_train,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-    data_loader_val = DataLoaderX(
-        dataset_val,
-        batch_size=args.batch_size,
-        sampler=val_sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
+    batch_sampler_train = torch.utils.data.BatchSampler(
+        sampler_train, args.batch_size, drop_last=True)
+    data_loader_train = DataLoaderX(dataset_train, batch_sampler=batch_sampler_train,
+                                    num_workers=args.num_workers)
+    data_loader_val   = DataLoaderX(dataset_val, args.batch_size, sampler=sampler_val,
+                                    num_workers=args.num_workers)
 
-    # ─── 체크포인트 이어받기 ───
+    # ─── 체크포인트 이어받기 ───────────────────────────────────────────
+    output_dir = Path(args.output_dir)
     if args.resume:
-        cp = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(cp['model'])
-        if 'optimizer' in cp and 'lr_scheduler' in cp and 'epoch' in cp:
-            optimizer.load_state_dict(cp['optimizer'])
-            lr_scheduler.load_state_dict(cp['lr_scheduler'])
-            args.start_epoch = cp['epoch'] + 1
+        ckpt = torch.load(args.resume, map_location='cpu')
+        model_without_ddp.load_state_dict(ckpt['model'])
+        if all(k in ckpt for k in ['optimizer', 'lr_scheduler', 'epoch']):
+            optimizer.load_state_dict(ckpt['optimizer'])
+            lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
+            args.start_epoch = ckpt['epoch'] + 1
+            print(f"▶ Resumed from epoch {ckpt['epoch']} (AUC={ckpt.get('auc', 'N/A')})")
 
-    # ─── 학습/평가 루프 ───
+    # ─── 로그 & Early-Stopping 변수 ────────────────────────────────────
     print("Start training")
-    start_time = time.time()
-    log    = MetricLog()
-    record = log.record
+    start_time   = time.time()
+    log          = MetricLog()
+    record       = log.record
+    best_auc     = -1.0
+    patience_cnt = 0
 
+    # ─── Epoch 루프 ────────────────────────────────────────────────────
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            train_sampler.set_epoch(epoch)
+            sampler_train.set_epoch(epoch)
 
         train_one_epoch(model, data_loader_train, optimizer, device, record, epoch)
         lr_scheduler.step()
 
-        # ─── 체크포인트 저장 ───
+        # ─── 주기적 체크포인트(전체 모델) ─────────────────────────────
         if args.output_dir:
-            ckpts = []
-            base = f"{args.dataset}_" + ("use_slot_" if args.use_slot else "no_slot_")
-            if args.use_slot and args.loss_status != 1:
-                base += "negative_"
+            base = f"{args.dataset}_{'use_slot_' if args.use_slot else 'no_slot_'}" + \
+                   (f"negative_" if args.use_slot and args.loss_status != 1 else "")
             if args.cal_area_size:
                 base += f"for_area_size_{args.lambda_value}_{args.slots_per_class}_"
-            ckpts.append(Path(args.output_dir) / (base + "checkpoint.pth"))
+            cp_paths = [output_dir / (base + "checkpoint.pth")]
             if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 10 == 0:
-                ckpts.append(Path(args.output_dir) / (base + f"checkpoint{epoch:04}.pth"))
-            for p in ckpts:
+                cp_paths.append(output_dir / (base + f"checkpoint{epoch:04}.pth"))
+            for p in cp_paths:
                 prt.save_on_master({
-                    'model':       model_without_ddp.state_dict(),
-                    'optimizer':   optimizer.state_dict(),
-                    'lr_scheduler':lr_scheduler.state_dict(),
-                    'epoch':       epoch,
-                    'args':        args,
+                    'model':        model_without_ddp.state_dict(),
+                    'optimizer':    optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch':        epoch,
+                    'args':         args,
                 }, p)
 
+        # ─── Validation & 로그 출력 ───────────────────────────────────
         evaluate(model, data_loader_val, device, record, epoch)
         log.print_metric()
 
-        if "auc" in record["val"]:
-            print(f"Epoch {epoch:02d} | Val AUC: {record['val']['auc'][-1]:.4f}")
+        cur_auc = record['val'].get('auc', [None])[-1]
+        if cur_auc is not None:
+            print(f"Epoch {epoch:02d} | "
+                  f"Train Acc {record['train']['acc'][-1]:.3f} | "
+                  f"Val Acc {record['val']['acc'][-1]:.3f} | "
+                  f"Val AUC {cur_auc:.4f}")
 
-    total_time = time.time() - start_time
-    print('Training time', str(datetime.timedelta(seconds=int(total_time))))
+            # ── Best-AUC 체크포인트 ───────────────────────────────
+            if cur_auc > best_auc:
+                best_auc = cur_auc
+                patience_cnt = 0
+                best_path = output_dir / args.best_ckpt_name
+                prt.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'auc': best_auc,
+                    'args': args,
+                }, best_path)
+                print(f"  ▲ New best AUC! checkpoint saved to {best_path.name}")
+            else:
+                patience_cnt += 1
+                print(f"  ▼ AUC not improved ({patience_cnt}/{args.early_stop_patience})")
+
+            # ── Early Stopping ──────────────────────────────────
+            if patience_cnt >= args.early_stop_patience:
+                print(f"Early stopping at epoch {epoch}. Best Val AUC = {best_auc:.4f}")
+                break
+
+    # ─── 훈련 종료 로그 ───────────────────────────────────────────────
+    elapsed = str(datetime.timedelta(seconds=int(time.time() - start_time)))
+    print(f"Training time {elapsed}")
     return [record["train"]["acc"][-1], record["val"]["acc"][-1]]
 
 

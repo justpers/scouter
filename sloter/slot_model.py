@@ -85,20 +85,25 @@ class SlotModel(nn.Module):
                 self.dfs_freeze(self.backbone, args.freeze_layers)
 
     def dfs_freeze(self, model, freeze_layer_num):
+        """
+        freeze_layer_num : 0~4 (ResNet 기준)
+        0 = freeze 없음, 1 = layer1 만 freeze, …, 4 = layer1~layer4 freeze
+        """
         if freeze_layer_num == 0:
             return
 
-        unfreeze_layers = ['layer4', 'layer3', 'layer2', 'layer1'][:4-freeze_layer_num]
+        # ResNet stage 이름
+        stage_names = ['layer1', 'layer2', 'layer3', 'layer4']
+        freeze_stages = stage_names[:freeze_layer_num]
+
         for name, child in model.named_children():
-            skip = False
-            for freeze_layer in unfreeze_layers:
-                if freeze_layer in name:
-                    skip = True
-                    break
-            if skip:
+            # stage 단위로 freeze
+            if name in freeze_stages:
+                for p in child.parameters():
+                    p.requires_grad = False
+                # 세부 모듈까지 내려갈 필요 없음
                 continue
-            for param in child.parameters():
-                param.requires_grad = False
+            # 그 외 모듈(conv1, bn1, fc 등)은 재귀 탐색
             self.dfs_freeze(child, freeze_layer_num)
 
     def dfs_freeze_bnorm(self, model):

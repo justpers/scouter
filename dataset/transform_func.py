@@ -35,23 +35,34 @@ class Resize(object):
 
 
 class Aug(object):
-    """class for preprocessing images via imgaug."""
-    def __init__(self, aug: bool):
+    def __init__(self, aug: bool, level: str = "base"):  # level = base|strong
         self.aug = aug
+        self.level = level
 
     def __call__(self, image):
-        # image는 numpy array (H, W, C) 형태라고 가정
         if not self.aug:
             return image
-        seq = iaa.Sequential([
-            iaa.SomeOf((0, 2), [
-                iaa.Fliplr(0.5),
-                iaa.Flipud(0.5),
-                iaa.Affine(rotate=(-15, 15)),
-                iaa.LinearContrast((0.8, 1.2)),
-                iaa.AddToBrightness((-20, 20))
+
+        if self.level == "strong":
+            seq = iaa.Sequential([
+                iaa.SomeOf((1, 3), [
+                    iaa.Fliplr(0.5), iaa.Flipud(0.3),
+                    iaa.Affine(rotate=(-25, 25), scale=(0.9, 1.1)),
+                    iaa.LinearContrast((0.7, 1.4)),
+                    iaa.AddToBrightness((-30, 30)),
+                    iaa.AdditiveGaussianNoise(scale=(0, 0.03*255))
+                ])
             ])
-        ])
+        else:  # base
+            seq = iaa.Sequential([
+                iaa.SomeOf((0, 2), [
+                    iaa.Fliplr(0.5),
+                    iaa.Affine(rotate=(-15, 15)),
+                    iaa.LinearContrast((0.8, 1.2)),
+                    iaa.AddToBrightness((-20, 20))
+                ])
+            ])
+
         # imgaug은 (H, W, C) numpy array 를 받아서 동일한 shape 로 반환합니다.
         arr = image if isinstance(image, np.ndarray) else np.array(image)
         aug_arr = seq(image=arr)
@@ -116,7 +127,7 @@ def make_transform(args, mode):
     if mode == "train":
         return Compose([
             Resize((args.img_size, args.img_size)),
-            Aug(args.aug),
+            Aug(args.aug, level=getattr(args, "aug_level", "base")),  
             normalize,
         ])
     elif mode == "val":
