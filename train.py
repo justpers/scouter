@@ -91,9 +91,24 @@ def main(args):
             model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
 
-    # ─── Optimizer / Criterion / Scheduler ────────────────────────────
-    params = [p for p in model_without_ddp.parameters() if p.requires_grad]
-    optimizer     = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    # ─── Optimizer 분리 설정 (backbone vs fc/slot) ───────────────────
+    fc_params = []
+    backbone_params = []
+
+    for name, param in model_without_ddp.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'backbone.fc' in name or 'slot' in name or 'conv1x1' in name:
+            fc_params.append(param)
+        else:
+            backbone_params.append(param)
+
+    # 최종 Optimizer 구성
+    optimizer = torch.optim.AdamW([
+        {'params': backbone_params, 'lr': args.lr},
+        {'params': fc_params, 'lr': args.lr_fc}
+    ], weight_decay=args.weight_decay)
+
     criterion     = torch.nn.CrossEntropyLoss()
     lr_scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_drop)
 
