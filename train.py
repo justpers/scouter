@@ -67,7 +67,7 @@ def get_args_parser():
     parser.add_argument('--world_size',  default=1, type=int)
     parser.add_argument('--local_rank',  type=int)
     parser.add_argument('--dist_url',    default='env://', help='distributed URL')
-    parser.add_argument('--resume',      default=False, type=str2bool)
+    parser.add_argument('--resume',      default='', type=str, help='path to checkpoint to resume from')
     parser.add_argument('--start_epoch', default=0,     type=int)
     return parser
 
