@@ -20,10 +20,12 @@ def load_backbone(args):
         args.model,
         pretrained=args.pre_trained,
         num_classes=args.num_classes,
-        in_chans=getattr(args, "input_channels", 1))
+        in_chans= 3
+        #in_chans=getattr(args, "input_channels", 1)
+    )
     
-    if getattr(args, "input_channels", 1) == 1:
-        bone.conv1 == nn.Conv2d(1, 64, 3, stride=2, padding=1, bias=False)
+    if getattr(args, "input_channels", 3) == 1 and bone.conv1.in_channels == 1:
+        bone.conv1 == nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=1, bias=False)
 
     if args.use_pre:
         checkpoint = torch.load(f"saved_model/{args.dataset}_no_slot_checkpoint.pth")
