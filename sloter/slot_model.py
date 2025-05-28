@@ -9,132 +9,145 @@ from collections import OrderedDict
 
 class Identical(nn.Module):
     def __init__(self):
-        super(Identical, self).__init__()
-
+        super().__init__()
     def forward(self, x):
         return x
 
 
 def load_backbone(args):
+    # 1) 분류 헤드 포함해 뽑고, 나중에 필요하면 지워줄 거임
     bone = create_model(
         args.model,
         pretrained=args.pre_trained,
         num_classes=args.num_classes,
-        in_chans= 3
-        #in_chans=getattr(args, "input_channels", 1)
+        in_chans=getattr(args, "input_channels", 3)
     )
-    
-    if getattr(args, "input_channels", 3) == 1 and bone.conv1.in_channels == 1:
-        bone.conv1 == nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=1, bias=False)
 
+    # 2) grayscale → 첫 conv 교체
+    if getattr(args, "input_channels", 3) == 1 and bone.conv1.in_channels == 3:
+        bone.conv1 = nn.Conv2d(1, bone.conv1.out_channels,
+                               kernel_size=bone.conv1.kernel_size,
+                               stride=bone.conv1.stride,
+                               padding=bone.conv1.padding,
+                               bias=False)
+
+    # 3) 만약 use_slot 이면 언제나 classifier 헤드를 전부 Identity 로 교체
+    if args.use_slot:
+        for name in ["global_pool", "fc", "classifier", "last_linear", "head", "head_fc"]:
+            if hasattr(bone, name):
+                setattr(bone, name, Identical())
+
+    # 4) pretrained backbone 불러오기 옵션
     if args.use_pre:
-        checkpoint = torch.load(f"saved_model/{args.dataset}_no_slot_checkpoint.pth")
-        new_state_dict = OrderedDict()
-        for k, v in checkpoint["model"].items():
-            name = k[9:]  # remove `backbone.`
-            if name in bone.state_dict() and bone.state_dict()[name].shape == v.shape:
-                new_state_dict[name] = v
-            else:
-                print(f"Skipping: {name} due to shape mismatch")
-                
-        bone.load_state_dict(new_state_dict, strict=False)  # 호환되지 않는 conv1 등 무시
-        print("load pre dataset parameter over")
-        if not args.grad:
-            if 'seresnet' in args.model:
-                bone.avg_pool = Identical()
-                bone.last_linear = Identical()
-            elif 'res' in args.model:
-                bone.global_pool = Identical()
-                bone.fc = Identical()
-            elif 'efficient' in args.model:
-                bone.global_pool = Identical()
-                bone.classifier = Identical()
-            elif 'densenet' in args.model:
-                bone.global_pool = Identical()
-                bone.classifier = Identical()
-            elif 'mobilenet' in args.model:
-                bone.global_pool = Identical()
-                bone.conv_head = Identical()
-                bone.act2 = Identical()
-                bone.classifier = Identical()
+        ckpt = torch.load(f"saved_model/{args.dataset}_no_slot_checkpoint.pth")
+        new_st = OrderedDict()
+        for k, v in ckpt["model"].items():
+            nm = k.replace("backbone.", "")
+            if nm in bone.state_dict() and bone.state_dict()[nm].shape == v.shape:
+                new_st[nm] = v
+        bone.load_state_dict(new_st, strict=False)
+        print("▶ Loaded pretrained backbone parameters")
+
+        if not args.grad and not args.use_slot:
+            # grad freeze only when slot 안 쓸 때
+            # (slot 쓸 때는 feature map 필요하므로 conv1~layer4 freeze만)
+            bone.global_pool = Identical()
+            bone.fc = Identical()
+
     return bone
 
-
 class SlotModel(nn.Module):
+    # --------------------------- INIT ----------------------------------
     def __init__(self, args):
-        super(SlotModel, self).__init__()
+        super().__init__()
         self.use_slot = args.use_slot
+        self.hidden_dim = args.hidden_dim
+        self.lambda_value = float(args.lambda_value)
+
+        # 1) backbone ----------------------------------------------------
         self.backbone = load_backbone(args)
+
+        # 2) slot branch -------------------------------------------------
         if self.use_slot:
-            if 'densenet' in args.model:
-                self.feature_size = 8
-            else:
-                self.feature_size = 9
+            # (a) conv1x1는 백본 출력 채널을 본 뒤에 만들기 위해 placeholder
+            self.conv1x1 = None   # -> real module은 첫 forward 때 생성
 
-            self.channel = args.channel
-            self.slots_per_class = args.slots_per_class
-            self.conv1x1 = nn.Conv2d(self.channel, args.hidden_dim, kernel_size=(1, 1), stride=(1, 1))
-            if args.pre_trained:
-                self.dfs_freeze(self.backbone, args.freeze_layers)
-            self.slot = SlotAttention(args.num_classes, self.slots_per_class, args.hidden_dim, vis=args.vis,
-                                         vis_id=args.vis_id, loss_status=args.loss_status, power=args.power, to_k_layer=args.to_k_layer)
-            self.position_emb = build_position_encoding('sine', hidden_dim=args.hidden_dim)
-            self.lambda_value = float(args.lambda_value)
-        else:
-            if args.pre_trained:
-                self.dfs_freeze(self.backbone, args.freeze_layers)
+            # (b) positional encoding
+            self.position_emb = build_position_encoding(
+                'sine', hidden_dim=self.hidden_dim
+            )
 
-    def dfs_freeze(self, model, freeze_layer_num):
-        """
-        freeze_layer_num : 0~4 (ResNet 기준)
-        0 = freeze 없음, 1 = layer1 만 freeze, …, 4 = layer1~layer4 freeze
-        """
-        if freeze_layer_num == 0:
-            return
+            # (c) Slot-Attention
+            self.slot = SlotAttention(
+                num_classes      = args.num_classes,
+                slots_per_class  = args.slots_per_class,
+                dim              = self.hidden_dim,
+                iters            = getattr(args, "slot_iters", 3),   # ★ 반드시 1 이상
+                vis              = args.vis,
+                vis_id           = args.vis_id,
+                loss_status      = args.loss_status,
+                power            = args.power,
+                to_k_layer       = args.to_k_layer
+            )
 
-        # ResNet stage 이름
-        stage_names = ['layer1', 'layer2', 'layer3', 'layer4']
-        freeze_stages = stage_names[:freeze_layer_num]
+        # 3) freeze 일부 레이어(선택) ------------------------------------
+        if args.pre_trained:
+            self._freeze_backbone(args.freeze_layers)
 
-        for name, child in model.named_children():
-            # stage 단위로 freeze
-            if name in freeze_stages:
-                for p in child.parameters():
-                    p.requires_grad = False
-                # 세부 모듈까지 내려갈 필요 없음
-                continue
-            # 그 외 모듈(conv1, bn1, fc 등)은 재귀 탐색
-            self.dfs_freeze(child, freeze_layer_num)
+    # ------------------------- UTILITIES -------------------------------
+    def _freeze_backbone(self, freeze_layer_num):
+        stages = ['layer1', 'layer2', 'layer3', 'layer4'][:freeze_layer_num]
 
-    def dfs_freeze_bnorm(self, model):
-        for name, child in model.named_children():
-            if 'bn' not in name:
-                self.dfs_freeze_bnorm(child)
-                continue
-            for param in child.parameters():
-                param.requires_grad = False
-            self.dfs_freeze_bnorm(child)
+        def dfs(m):
+            for n, c in m.named_children():
+                if n in stages:
+                    for p in c.parameters():
+                        p.requires_grad = False
+                else:
+                    dfs(c)
+        dfs(self.backbone)
+
+    def _ensure_conv1x1(self, feats):
+        "몇 번째 forward 가 되었든 conv1x1 이 없으면 지금 만들어 삽입"
+        if self.conv1x1 is None:
+            in_ch = feats.size(1)            # runtime 에서 채널 확보
+            self.conv1x1 = nn.Conv2d(in_ch, self.hidden_dim, kernel_size=1).to(feats.device)
+
+    # --------------------------- FORWARD -------------------------------
+    @torch.no_grad()
+    def _backbone_features(self, x):
+        # 백본이 timm / torchvision 등에 따라 forward_features 유무가 다름
+        if self.use_slot and hasattr(self.backbone, "forward_features"):
+            return self.backbone.forward_features(x)      # [B,C,H,W]
+        return self.backbone(x)                           # [B,num_cls] or [B,C,H,W]
 
     def forward(self, x, target=None):
-        x = self.backbone(x)
+        feats = self._backbone_features(x)
+
+        # ----------------- SLOT MODE -----------------------------------
         if self.use_slot:
-            x = self.conv1x1(x.view(x.size(0), self.channel, self.feature_size, self.feature_size))
-            x = torch.relu(x)
-            pe = self.position_emb(x)
-            x_pe = x + pe
+            self._ensure_conv1x1(feats)                   # <- 동적 생성/검증
+            feats = F.relu(self.conv1x1(feats), inplace=True)
 
-            b, n, r, c = x.shape
-            x = x.reshape((b, n, -1)).permute((0, 2, 1))
-            x_pe = x_pe.reshape((b, n, -1)).permute((0, 2, 1))
-            x, attn_loss = self.slot(x_pe, x)
-        output = F.log_softmax(x, dim=1)
+            pos   = self.position_emb(feats)              # [B,C,H,W]
 
+            B, C, H, W = feats.shape
+            feats_flat = feats.flatten(2).permute(0,2,1)  # [B,HW,C]
+            pos_flat   = pos  .flatten(2).permute(0,2,1)
+
+            logits, attn_loss = self.slot(pos_flat, feats_flat)
+            output = F.log_softmax(logits, dim=1)
+
+        # -------------- CLASSIFICATION-ONLY ---------------------------
+        else:
+            output = F.log_softmax(feats, dim=1)
+
+        # -------------------------- LOSS ------------------------------
         if target is not None:
+            ce = F.nll_loss(output, target)
             if self.use_slot:
-                loss = F.nll_loss(output, target) + self.lambda_value * attn_loss
-                return [output, [loss, F.nll_loss(output, target), attn_loss]]
-            else:
-                loss = F.nll_loss(output, target)
-                return [output, [loss]]
+                total = ce + self.lambda_value * attn_loss
+                return output, [total, ce, attn_loss]
+            return output, [ce]
 
         return output

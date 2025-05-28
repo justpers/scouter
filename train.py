@@ -11,7 +11,6 @@ from tools.calculate_tool import MetricLog
 import datetime
 import time
 
-
 def get_args_parser():
     def str2bool(v):
         if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -55,6 +54,8 @@ def get_args_parser():
     parser.add_argument('--pre_trained', default=True, type=str2bool)
     parser.add_argument('--vis',      default=False, type=str2bool)
     parser.add_argument('--vis_id',   default=0,     type=int)
+    parser.add_argument('--freeze_backbone', default=False, type=str2bool, help='freeze backbone when using pretrained weights')
+    parser.add_argument('--resume_backbone', default=None, type=str, help='path to checkpoint from which to load backbone only')
     # ─── 기타 기능 ───
     parser.add_argument('--aug',    default=True,  type=str2bool, help='enable data augmentation')
     parser.add_argument('--aug_level', default='base', type=str, choices=['base', 'strong'], help='augmentation 강도(base/strong)')
@@ -91,7 +92,7 @@ def main(args):
             model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
 
-    # ─── Optimizer 분리 설정 (backbone vs fc/slot) ───────────────────
+    # ─── Optimizer 파라미터 분리 설정 (backbone vs fc/slot) ───────────
     fc_params = []
     backbone_params = []
 
@@ -132,12 +133,24 @@ def main(args):
     output_dir = Path(args.output_dir)
     if args.resume:
         ckpt = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(ckpt['model'])
-        if all(k in ckpt for k in ['optimizer', 'lr_scheduler', 'epoch']):
+        ckpt_model = ckpt['model']
+
+        # Slot 모델이 아니라 baseline에서 저장된 경우 backbone만 가져옴
+        if args.use_slot:
+            backbone_ckpt = {k: v for k, v in ckpt_model.items() if k.startswith('backbone.')}
+            missing, unexpected = model_without_ddp.backbone.load_state_dict(backbone_ckpt, strict=False)
+            print(f"\u25b6 Loaded baseline backbone from {args.resume}")
+            print(f"   - Missing keys: {missing}")
+            print(f"   - Unexpected keys: {unexpected}")
+        else:
+            # baseline 재학습을 이어서 하려는 경우 전체 불러오기
+            model_without_ddp.load_state_dict(ckpt_model)
+
+        if all(k in ckpt for k in ['optimizer', 'lr_scheduler', 'epoch']) and not args.use_slot:
             optimizer.load_state_dict(ckpt['optimizer'])
             lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
             args.start_epoch = ckpt['epoch'] + 1
-            print(f"▶ Resumed from epoch {ckpt['epoch']} (AUC={ckpt.get('auc', 'N/A')})")
+            print(f"\u25b6 Resumed full model from epoch {ckpt['epoch']} (AUC={ckpt.get('auc', 'N/A')})")
 
     # ─── 로그 & Early-Stopping 변수 ────────────────────────────────────
     print("Start training")
@@ -197,10 +210,10 @@ def main(args):
                     'auc': best_auc,
                     'args': args,
                 }, best_path)
-                print(f"  ▲ New best AUC! checkpoint saved to {best_path.name}")
+                print(f"  \u25b2 New best AUC! checkpoint saved to {best_path.name}")
             else:
                 patience_cnt += 1
-                print(f"  ▼ AUC not improved ({patience_cnt}/{args.early_stop_patience})")
+                print(f"  \u25bc AUC not improved ({patience_cnt}/{args.early_stop_patience})")
 
             # ── Early Stopping ──────────────────────────────────
             if patience_cnt >= args.early_stop_patience:
@@ -211,6 +224,7 @@ def main(args):
     elapsed = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     print(f"Training time {elapsed}")
     return [record["train"]["acc"][-1], record["val"]["acc"][-1]]
+
 
 
 def param_translation(args):
