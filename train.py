@@ -1,3 +1,5 @@
+import random
+import numpy as np
 import argparse
 import datetime
 import time
@@ -18,16 +20,6 @@ from tools.prepare_things import DataLoaderX
 ###############################################################################
 
 def _patch_slot_attention():
-    """Monkey‑patch *sloter.utils.slot_attention.SlotAttention* so that the
-    GRU always receives a **3‑D tensor** (seq_len, batch, dim) instead of the
-    erroneous 4‑D variant that caused *ValueError: GRU expected input to be
-    2D or 3D*.
-
-    The logic is unchanged – we merely reshape the *updates* and *slots_prev*
-    tensors explicitly before feeding them to the GRU and switch the GRU to
-    **batch_first=False** (PyTorch default) so that the input shape is
-    *(seq_len = 1, batch_size = B·S, dim)*.
-    """
 
     # Lazy import so that the module must exist in the runtime environment
     from sloter.utils.slot_attention import SlotAttention as _SA
@@ -111,8 +103,8 @@ def get_args_parser():
 
     # ── optimisation --------------------------------------------------------
     parser.add_argument("--lr",             default=1e-4, type=float)
-    parser.add_argument("--slot_lr_mult",   default=5.0,  type=float,
-                        help="LR multiplier for slot / FC parameters")
+    parser.add_argument("--slot_lr_mult",   default=5.0,  type=float, help="LR multiplier for slot / FC parameters")
+    parser.add_argument('--lr_fc', default=None, type=float, help="(deprecated) absolute LR for slot / FC params")
     parser.add_argument("--weight_decay",   default=1e-4, type=float)
     parser.add_argument("--batch_size",     default=64,   type=int)
     parser.add_argument("--epochs",         default=20,   type=int)
@@ -121,7 +113,6 @@ def get_args_parser():
 # 👇 바로 아래에 추가
     parser.add_argument('--slot_iters', type=int, default=3,
                     help='number of recurrent iterations in Slot-Attention')
-
 
     # ── early‑stopping / checkpoint ----------------------------------------
     parser.add_argument("--early_stop_patience", default=5, type=int)
@@ -166,6 +157,14 @@ def get_args_parser():
 ###############################################################################
 
 def main(args):
+    seed = getattr(args, "seed", 777) 
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
     # Patch SlotAttention at runtime ***before*** model construction
     _patch_slot_attention()
 
@@ -179,6 +178,12 @@ def main(args):
           "negative loss" if args.use_slot and args.loss_status != 1 else "positive loss")
 
     model_wo_ddp = model
+
+    if args.lr_fc is not None:
+        # args.lr == backbone LR → multiplier = lr_fc / lr
+        args.slot_lr_mult = args.lr_fc / args.lr
+        print(f"▶ using lr_fc={args.lr_fc:.3g}  → slot_lr_mult={args.slot_lr_mult:.1f}")
+
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model,
