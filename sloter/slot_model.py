@@ -95,17 +95,30 @@ class SlotModel(nn.Module):
             self._freeze_backbone(args.freeze_layers)
 
     # ------------------------- UTILITIES -------------------------------
-    def _freeze_backbone(self, freeze_layer_num):
-        stages = ['layer1', 'layer2', 'layer3', 'layer4'][:freeze_layer_num]
+    def _freeze_backbone(self, freeze_layer_num: int):
+        """
+        Slot branch를 쓸 때는 layer3·4를 unfreeze 해야 feature가 fine-tune 가능.
+        freeze_layer_num 은 0~4 로 받고, slot 사용 시 -1 로 넘어오게 하세요.
+        """
+        if self.use_slot:
+            freeze_layer_num = max(0, freeze_layer_num - 2)   # layer1,2 만 freeze
+        stages = [f"layer{i}" for i in range(1, 1 + freeze_layer_num)]
 
-        def dfs(m):
-            for n, c in m.named_children():
-                if n in stages:
-                    for p in c.parameters():
-                        p.requires_grad = False
-                else:
-                    dfs(c)
-        dfs(self.backbone)
+        for n, c in self.backbone.named_children():
+            if n in stages:
+                for p in c.parameters():
+                    p.requires_grad = False
+    def param_groups(self, base_lr: float, slot_lr_mult: int = 5):
+        hi, lo = [], []
+        for n, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            (hi if ("slot" in n or "conv1x1" in n) else lo).append(p)
+
+        return [
+            {"params": lo, "lr": base_lr},
+            {"params": hi, "lr": base_lr * slot_lr_mult},
+        ]
 
     def _ensure_conv1x1(self, feats):
         "몇 번째 forward 가 되었든 conv1x1 이 없으면 지금 만들어 삽입"
