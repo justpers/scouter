@@ -99,7 +99,7 @@ def get_args_parser():
     parser.add_argument("--img_size",      default=260,    type=int)
     parser.add_argument("--output_dir",    default="saved_model/")
     parser.add_argument("--device",        default="cuda")
-    parser.add_argument("--num_workers",   default=2,      type=int)
+    parser.add_argument("--num_workers",   default=1,      type=int)
 
     # ── optimisation --------------------------------------------------------
     parser.add_argument("--lr",             default=1e-4, type=float)
@@ -265,6 +265,7 @@ def main(args):
 
         # validation
         evaluate(model, loader_val, device, record, epoch)
+        torch.cuda.empty_cache()
         log.print_metric()
 
         cur_auc = record["val"].get("auc", [None])[-1]
