@@ -142,13 +142,11 @@ def main(args):
     best_acc = 0.0
     if args.resume:
         ckpt = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(ckpt['model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
-        lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
-        start_epoch = ckpt['epoch'] + 1
-        best_acc = ckpt.get('best_acc', 0.0)
-        print(f"Resume from {args.resume}, start_epoch={start_epoch}, best_acc={best_acc:.3f}")
-
+        model_without_ddp.load_state_dict(ckpt['model'], strict=False)
+        start_epoch = 0
+        best_acc = 0.0
+        print(f"Resume from {args.resume} → backbone만 로드, 학습은 처음부터 이어서 진행합니다.")
+        
     # 7) 로그 초기화
     log = MetricLog()
     record = log.record

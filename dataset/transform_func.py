@@ -4,8 +4,7 @@ import torchvision.transforms.functional as F
 from collections.abc import Sequence, Iterable
 import numpy as np
 from PIL import Image
-from imgaug import augmenters as iaa
-
+from torchvision import transforms
 
 _pil_interpolation_to_str = {
     Image.NEAREST: 'PIL.Image.NEAREST',
@@ -25,62 +24,47 @@ class Resize(object):
         self.interpolation = interpolation
 
     def __call__(self, image):
-        # torchvision.functional.resize는 PIL Image나 Tensor를 받지만,
-        # 여기서는 PIL Image → numpy array 로 바꿔줍니다.
         return np.array(F.resize(image, self.size, self.interpolation))
 
     def __repr__(self):
         interpolate_str = _pil_interpolation_to_str[self.interpolation]
-        return self.__class__.__name__ + f'(size={self.size}, interpolation={interpolate_str})'
+        return self.__class__.__name__ + '(size={0}, interpolation={1})'.format(self.size, interpolate_str)
 
 
 class Aug(object):
-    def __init__(self, aug: bool, level: str = "base"):  # level = base|strong
+    """class for preprocessing images. """
+    def __init__(self, aug):
         self.aug = aug
-        self.level = level
 
     def __call__(self, image):
-        if not self.aug:
+        if self.aug:
+            ImgAug = ImageAugment()   # ImageAugment class will augment the img and label at same time
+            seq = ImgAug.aug_sequence()
+            image_aug = ImgAug.aug(image, seq)
+            return image_aug
+        else:
             return image
-
-        if self.level == "strong":
-            seq = iaa.Sequential([
-                iaa.SomeOf((1, 3), [
-                    iaa.Fliplr(0.5), iaa.Flipud(0.3),
-                    iaa.Affine(rotate=(-25, 25), scale=(0.9, 1.1)),
-                    iaa.LinearContrast((0.7, 1.4)),
-                    iaa.AddToBrightness((-30, 30)),
-                    iaa.AdditiveGaussianNoise(scale=(0, 0.03*255))
-                ])
-            ])
-        else:  # base
-            seq = iaa.Sequential([
-                iaa.SomeOf((0, 2), [
-                    iaa.Fliplr(0.5),
-                    iaa.Affine(rotate=(-15, 15)),
-                    iaa.LinearContrast((0.8, 1.2)),
-                    iaa.AddToBrightness((-20, 20))
-                ])
-            ])
-
-        # imgaug은 (H, W, C) numpy array 를 받아서 동일한 shape 로 반환합니다.
-        arr = image if isinstance(image, np.ndarray) else np.array(image)
-        aug_arr = seq(image=arr)
-        return aug_arr
 
     def __repr__(self):
         return self.__class__.__name__ + 'Augmentation function'
 
 
 class ToTensor(object):
-    """Convert a ``PIL Image`` or ``numpy.ndarray`` to tensor."""
-    def __call__(self, image):
+    """Convert a ``PIL Image`` or ``numpy.ndarray`` to tensor.
+
+    Converts a PIL Image or numpy.ndarray (H x W x C) in the range
+    [0, 255] to a torch.FloatTensor of shape (C x H x W) in the range [0.0, 1.0]
+    if the PIL Image belongs to one of the modes (L, LA, P, I, F, RGB, YCbCr, RGBA, CMYK, 1)
+    or if the numpy.ndarray has dtype = np.uint8
+
+    In the other cases, tensors are returned without scaling.
+    """
+
+    def __call__(self, image, color=True):
         if image.ndim == 2:
-            # grayscale → (H, W, 1)
             image = image[:, :, None]
-        # (H, W, C) → (C, H, W), 0~255 → 0.0~1.0
-        tensor = torch.from_numpy((image / 255.0).transpose(2, 0, 1).copy()).float()
-        return tensor
+        image = torch.from_numpy(((image/255).transpose([2, 0, 1])).copy())  # convert numpy data to tensor
+        return image
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
@@ -98,7 +82,8 @@ class Compose(object):
     def __repr__(self):
         format_string = self.__class__.__name__ + '('
         for t in self.transforms:
-            format_string += '\n    ' + repr(t)
+            format_string += '\n'
+            format_string += '    {0}'.format(t)
         format_string += '\n)'
         return format_string
 
@@ -109,31 +94,41 @@ class Normalize(object):
         self.std = std
 
     def __call__(self, imgs):
-        # imgs는 tensor (C, H, W)
-        return F.normalize(imgs, mean=self.mean, std=self.std)
+        imgs = F.normalize(imgs, mean=self.mean, std=self.std)
+        return imgs
 
 
 def make_transform(args, mode):
-    normalize_value = {
-        "MNIST":    [[0.1307],         [0.3081]],
-        "CUB200":   [[0.485,0.456,0.406],[0.229,0.224,0.225]],
-        "ConText":  [[0.485,0.456,0.406],[0.229,0.224,0.225]],
-        "ImageNet": [[0.485,0.456,0.406],[0.229,0.224,0.225]],
-        "blastocyst": [[0.485,0.456,0.406],[0.229,0.224,0.225]],
-    }
-    mean, std = normalize_value[args.dataset]
-    normalize = Compose([ ToTensor(), Normalize(mean, std) ])
+    normalize_value = {"MNIST": [[0.1307], [0.3081]],
+                       "CUB200": [[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]],
+                     "ConText": [[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]],
+                       "ImageNet": [[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]],
+                       "Blastocyst": [[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]],
+                }
+
+    if args.dataset not in normalize_value:
+        raise ValueError(f"Unknown dataset {args.dataset} for normalization")
+
+    normalize_mean, normalize_std = normalize_value[args.dataset]
 
     if mode == "train":
-        return Compose([
-            Resize((args.img_size, args.img_size)),
-            Aug(args.aug, level=getattr(args, "aug_level", "base")),  
-            normalize,
-        ])
+        tv_transforms = [
+            transforms.Resize((args.img_size, args.img_size)),   # PIL.Image → PIL.Image
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(0.2, 0.2, 0.2, 0.1),
+            transforms.ToTensor(),                                # PIL → Tensor
+            transforms.Normalize(normalize_mean, normalize_std)
+        ]
+        return transforms.Compose(tv_transforms)
+
     elif mode == "val":
-        return Compose([
-            Resize((args.img_size, args.img_size)),
-            normalize,
-        ])
+        tv_transforms = [
+            transforms.Resize((args.img_size, args.img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(normalize_mean, normalize_std)
+        ]
+        return transforms.Compose(tv_transforms)
+
     else:
-        raise ValueError(f"unknown mode {mode}")
+        raise ValueError(f"Unknown mode: {mode}")

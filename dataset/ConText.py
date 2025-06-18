@@ -42,7 +42,8 @@ class MakeListImage():
     """
     def __init__(self, args):
         self.image_root = args.dataset_dir
-        self.category = get_name(self.image_root + "train/")
+        train_dir = os.path.join(self.image_root, "train")
+        self.category = get_name(train_dir) or []
         self.used_cat = self.category[:args.num_classes]
         # for c_id, c in enumerate(self.used_cat):
         #     print(c_id, '\t', c)
@@ -85,5 +86,5 @@ class ConText(Dataset):
         if self.transform:
             image = self.transform(image)
         label = self.all_item[item_id][1]
-        label = torch.from_numpy(np.array(label))
+        label = torch.tensor(label, dtype=torch.long)
         return {"image": image, "label": label, "names": image_path}

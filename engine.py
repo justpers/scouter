@@ -1,8 +1,9 @@
 import torch
 import tools.calculate_tool as cal
 from tqdm.auto import tqdm
-from collections.abc import Mapping
-from sklearn.metrics import roc_auc_score  # ← 추가
+from sklearn.metrics import accuracy_score, roc_auc_score
+import torch.nn.functional as F
+
 
 def train_one_epoch(model, data_loader, optimizer, device, record, epoch):
     model.train()
@@ -10,10 +11,56 @@ def train_one_epoch(model, data_loader, optimizer, device, record, epoch):
 
 
 @torch.no_grad()
-def evaluate(model, data_loader, device, record, epoch):
+def evaluate(model, data_loader, device, record=None, epoch=0):
     model.eval()
-    calculation(model, "val", data_loader, device, record, epoch)
 
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+    total_log = 0.0       # ← CE loss 누적
+    total_att = 0.0       # ← attention loss 누적
+    all_probs, all_labels = [], []
+
+    for batch in data_loader:
+        images = batch["image"].to(device).float()
+        labels = batch["label"].to(device)
+
+        # 모델 출력 및 loss_list 가져오기
+        outputs, loss_list = model(images, labels)
+        loss = loss_list[0]
+        ce   = loss_list[1]
+        att  = loss_list[2] if len(loss_list) > 2 else torch.tensor(0.0, device=device)
+
+        preds = outputs.argmax(dim=1)
+
+        total_loss    += loss.item() * images.size(0)
+        total_log     += ce.item()   * images.size(0)
+        total_att     += att.item()  * images.size(0)
+        total_correct += (preds == labels).sum().item()
+        total_samples += images.size(0)
+
+        probs = torch.softmax(outputs, dim=1)[:, 1]  # binary 분류 가정
+        all_probs.extend(probs.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+
+    avg_loss = total_loss / total_samples
+    avg_ce   = total_log  / total_samples
+    avg_att  = total_att  / total_samples
+    acc      = total_correct / total_samples
+    auc      = roc_auc_score(all_labels, all_probs)
+
+    if record is not None:
+        # 기존 train_one_epoch() 에서 사용하는 "log_loss" / "att_loss" 키와 동일하게 사용해야 저장됨
+        for k in ["loss", "log_loss", "att_loss", "acc", "auc"]:
+            if k not in record["val"]:
+                record["val"][k] = []
+        record["val"]["loss"].append(round(avg_loss, 3))
+        record["val"]["log_loss"].append(round(avg_ce, 3))   # CE 손실
+        record["val"]["att_loss"].append(round(avg_att, 3))  # attention 손실
+        record["val"]["acc"].append(round(acc, 3))
+        record["val"]["auc"].append(round(auc, 4))
+
+    return {"loss": avg_loss, "ce": avg_ce, "att": avg_att, "acc": acc, "auc": auc}
 
 def calculation(model, mode, data_loader, device, record, epoch, optimizer=None):
     L = len(data_loader)
@@ -22,62 +69,36 @@ def calculation(model, mode, data_loader, device, record, epoch, optimizer=None)
     running_att_loss = 0.0
     running_log_loss = 0.0
     print("start " + mode + " :" + str(epoch))
-
-    all_labels = []  # ← AUC용
-    all_probs = []
-
     for i_batch, sample_batch in enumerate(tqdm(data_loader)):
-        # 딕셔너리 형태 or 튜플 형태 대응
-        if isinstance(sample_batch, Mapping):
-            inputs = sample_batch["image"].to(device, dtype=torch.float32)
-            labels = sample_batch["label"].to(device, dtype=torch.int64)
-        elif isinstance(sample_batch, (list, tuple)) and len(sample_batch) == 2:
-            inputs, labels = sample_batch
-            inputs = inputs.to(device, dtype=torch.float32)
-            labels = labels.to(device, dtype=torch.int64)
-        else:
-            raise TypeError(f"Unsupported sample_batch format: {type(sample_batch)}")
+        inputs = sample_batch["image"].to(device, dtype=torch.float32)
+        labels = sample_batch["label"].to(device, dtype=torch.int64)
 
         if mode == "train":
             optimizer.zero_grad()
-
         logits, loss_list = model(inputs, labels)
-        total_loss = loss_list[0]
-
+        loss = loss_list[0]
         if mode == "train":
-            total_loss.backward()
+            loss.backward()
+            # clip_gradient(optimizer, 1.1)
             optimizer.step()
 
-        running_loss += total_loss.item()
-        ce_loss = loss_list[1] if len(loss_list) > 1 else total_loss
-        running_log_loss += ce_loss.item()
-        att_loss = loss_list[2] if len(loss_list) > 2 else torch.tensor(0.0, device=device)
-        running_att_loss += att_loss.item()
+        a = loss.item()
+        running_loss += a
+        if len(loss_list) > 2: # For slot training only
+            running_att_loss += loss_list[2].item()
+            running_log_loss += loss_list[1].item()
         running_corrects += cal.evaluateTop1(logits, labels)
-
-        # AUC 계산을 위한 확률 및 라벨 저장
-        if mode == "val":
-            probs = torch.exp(logits)  # log_softmax → softmax
-            all_probs.extend(probs[:, 1].detach().cpu().numpy())  # 양성 클래스 확률
-            all_labels.extend(labels.detach().cpu().numpy())
-
-    epoch_loss = round(running_loss / L, 3)
-    epoch_loss_log = round(running_log_loss / L, 3)
-    epoch_loss_att = round(running_att_loss / L, 3)
-    epoch_acc = round(running_corrects / L, 3)
-
+        # if i_batch % 10 == 0:
+        #     print("epoch: {} {}/{} Loss: {:.4f}".format(epoch, i_batch, L-1, a))
+    epoch_loss = round(running_loss/L, 3)
+    epoch_loss_log = round(running_log_loss/L, 3)
+    epoch_loss_att = round(running_att_loss/L, 3)
+    epoch_acc = round(running_corrects/L, 3)
     record[mode]["loss"].append(epoch_loss)
     record[mode]["acc"].append(epoch_acc)
     record[mode]["log_loss"].append(epoch_loss_log)
     record[mode]["att_loss"].append(epoch_loss_att)
 
-    # ROC-AUC 기록
-    if mode == "val":
-        try:
-            auc_score = roc_auc_score(all_labels, all_probs)
-        except:
-            auc_score = 0.5  # 실패 시 기본값
-        record[mode].setdefault("auc", []).append(round(auc_score, 4))
 
 def clip_gradient(optimizer, grad_clip):
     """

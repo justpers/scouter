@@ -5,7 +5,6 @@ Hacked together by Ross Wightman
 from itertools import repeat
 from collections.abc import Iterable as container_abcs
 
-
 # From PyTorch internals
 def _ntuple(n):
     def parse(x):
@@ -19,9 +18,3 @@ tup_single = _ntuple(1)
 tup_pair = _ntuple(2)
 tup_triple = _ntuple(3)
 tup_quadruple = _ntuple(4)
-
-
-
-
-
-

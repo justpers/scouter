@@ -6,161 +6,126 @@ from sloter.utils.position_encode import build_position_encoding
 from timm.models import create_model
 from collections import OrderedDict
 
-
 class Identical(nn.Module):
-    def __init__(self):
-        super().__init__()
-    def forward(self, x):
+    def forward(self, x):      # pylint: disable=arguments-differ
         return x
 
-
 def load_backbone(args):
-    # 1) 분류 헤드 포함해 뽑고, 나중에 필요하면 지워줄 거임
-    bone = create_model(
-        args.model,
-        pretrained=args.pre_trained,
-        num_classes=args.num_classes,
-        in_chans=getattr(args, "input_channels", 3)
-    )
+    """timm backbone + 분류헤드 제거"""
+    net = create_model(args.model,
+                       pretrained=args.pre_trained,
+                       num_classes=args.num_classes)
 
-    # 2) grayscale → 첫 conv 교체
-    if getattr(args, "input_channels", 3) == 1 and bone.conv1.in_channels == 3:
-        bone.conv1 = nn.Conv2d(1, bone.conv1.out_channels,
-                               kernel_size=bone.conv1.kernel_size,
-                               stride=bone.conv1.stride,
-                               padding=bone.conv1.padding,
-                               bias=False)
+    # MNIST 흑백 지원
+    if args.dataset == "MNIST":
+        net.conv1 = nn.Conv2d(1, 64, 3, stride=2, padding=1, bias=False)
 
-    # 3) 만약 use_slot 이면 언제나 classifier 헤드를 전부 Identity 로 교체
-    if args.use_slot:
-        for name in ["global_pool", "fc", "classifier", "last_linear", "head", "head_fc"]:
-            if hasattr(bone, name):
-                setattr(bone, name, Identical())
+    # ── 분류 헤드 떼기 (slot 사용 시) ───────────────────────────────────────────
+    if args.use_slot and not args.grad:
+        if 'seresnet' in args.model:
+            net.avg_pool, net.last_linear = Identical(), Identical()
+        elif 'res' in args.model:
+            net.global_pool, net.fc = Identical(), Identical()
+        elif 'efficient' in args.model:
+            net.global_pool, net.classifier = Identical(), Identical()
+        elif 'densenet' in args.model:
+            net.global_pool, net.classifier = Identical(), Identical()
+        elif 'mobilenet' in args.model:
+            net.global_pool = Identical()
+            net.conv_head = Identical()
+            net.act2 = Identical()
+            net.classifier = Identical()
 
-    # 4) pretrained backbone 불러오기 옵션
-    if args.use_pre:
-        ckpt = torch.load(f"saved_model/{args.dataset}_no_slot_checkpoint.pth")
-        new_st = OrderedDict()
-        for k, v in ckpt["model"].items():
-            nm = k.replace("backbone.", "")
-            if nm in bone.state_dict() and bone.state_dict()[nm].shape == v.shape:
-                new_st[nm] = v
-        bone.load_state_dict(new_st, strict=False)
-        print("▶ Loaded pretrained backbone parameters")
+    # ── no-slot 사전학습 파라미터(optional) ───────────────────────────────────
+    if args.use_slot and args.use_pre:
+        ckpt = torch.load(f"saved_model/{args.dataset}_no_slot_checkpoint.pth",
+                          map_location='cpu')
+        new_state = {k[9:]: v for k, v in ckpt["model"].items()}   # remove 'backbone.'
+        net.load_state_dict(new_state, strict=False)
+        print("✔ no-slot backbone weights loaded")
 
-        if not args.grad and not args.use_slot:
-            # grad freeze only when slot 안 쓸 때
-            # (slot 쓸 때는 feature map 필요하므로 conv1~layer4 freeze만)
-            bone.global_pool = Identical()
-            bone.fc = Identical()
+    return net
 
-    return bone
 
 class SlotModel(nn.Module):
-    # --------------------------- INIT ----------------------------------
     def __init__(self, args):
         super().__init__()
         self.use_slot = args.use_slot
-        self.hidden_dim = args.hidden_dim
-        self.lambda_value = float(args.lambda_value)
-
-        # 1) backbone ----------------------------------------------------
         self.backbone = load_backbone(args)
 
-        # 2) slot branch -------------------------------------------------
         if self.use_slot:
-            # (a) conv1x1는 백본 출력 채널을 본 뒤에 만들기 위해 placeholder
-            self.conv1x1 = None   # -> real module은 첫 forward 때 생성
+            # 백본 마지막 conv 채널 수 자동 추출(resnet/resnest/timm 계열 호환)
+            self.backbone_out_dim = getattr(self.backbone, "num_features", None)
+            if self.backbone_out_dim is None:                # timm 일부 모델 fallback
+                self.backbone_out_dim = list(self.backbone.children())[-1].in_channels
 
-            # (b) positional encoding
-            self.position_emb = build_position_encoding(
-                'sine', hidden_dim=self.hidden_dim
-            )
+            self.conv1x1 = nn.Conv2d(self.backbone_out_dim,
+                                     args.hidden_dim,
+                                     kernel_size=1,
+                                     bias=False)
 
-            # (c) Slot-Attention
+            # slot attention 모듈
             self.slot = SlotAttention(
-                num_classes      = args.num_classes,
-                slots_per_class  = args.slots_per_class,
-                dim              = self.hidden_dim,
-                iters            = getattr(args, "slot_iters", 3),   # ★ 반드시 1 이상
-                vis              = args.vis,
-                vis_id           = args.vis_id,
-                loss_status      = args.loss_status,
-                power            = args.power,
-                to_k_layer       = args.to_k_layer
-            )
+                num_classes     = args.num_classes,
+                slots_per_class = args.slots_per_class,
+                dim             = args.hidden_dim,
+                vis             = args.vis,
+                vis_id          = args.vis_id,
+                loss_status     = args.loss_status,
+                power           = args.power,
+                to_k_layer      = args.to_k_layer)
 
-        # 3) freeze 일부 레이어(선택) ------------------------------------
-        if args.pre_trained:
-            self._freeze_backbone(args.freeze_layers)
+            self.position_emb = build_position_encoding('sine',
+                                                        hidden_dim=args.hidden_dim)
+            self.lambda_value = float(args.lambda_value)
 
-    # ------------------------- UTILITIES -------------------------------
-    def _freeze_backbone(self, freeze_layer_num: int):
-        """
-        Slot branch를 쓸 때는 layer3·4를 unfreeze 해야 feature가 fine-tune 가능.
-        freeze_layer_num 은 0~4 로 받고, slot 사용 시 -1 로 넘어오게 하세요.
-        """
-        if self.use_slot:
-            freeze_layer_num = max(0, freeze_layer_num - 2)   # layer1,2 만 freeze
-        stages = [f"layer{i}" for i in range(1, 1 + freeze_layer_num)]
+            if args.pre_trained:
+                self._freeze_layers(self.backbone, args.freeze_layers)
+        elif args.pre_trained:
+            self._freeze_layers(self.backbone, args.freeze_layers)
 
-        for n, c in self.backbone.named_children():
-            if n in stages:
-                for p in c.parameters():
-                    p.requires_grad = False
-    def param_groups(self, base_lr: float, slot_lr_mult: int = 5):
-        hi, lo = [], []
-        for n, p in self.named_parameters():
-            if not p.requires_grad:
+    @staticmethod
+    def _freeze_layers(model, freeze_layer_num: int):
+        """앞쪽 layer1·2·3·4 중 freeze_layer_num 만큼 동결"""
+        if freeze_layer_num == 0:
+            return
+        unfreeze = ['layer4', 'layer3', 'layer2', 'layer1'][:4 - freeze_layer_num]
+        for name, child in model.named_children():
+            if any(layer in name for layer in unfreeze):
                 continue
-            (hi if ("slot" in n or "conv1x1" in n) else lo).append(p)
-
-        return [
-            {"params": lo, "lr": base_lr},
-            {"params": hi, "lr": base_lr * slot_lr_mult},
-        ]
-
-    def _ensure_conv1x1(self, feats):
-        "몇 번째 forward 가 되었든 conv1x1 이 없으면 지금 만들어 삽입"
-        if self.conv1x1 is None:
-            in_ch = feats.size(1)            # runtime 에서 채널 확보
-            self.conv1x1 = nn.Conv2d(in_ch, self.hidden_dim, kernel_size=1).to(feats.device)
-
-    # --------------------------- FORWARD -------------------------------
-    @torch.no_grad()
-    def _backbone_features(self, x):
-        # 백본이 timm / torchvision 등에 따라 forward_features 유무가 다름
-        if self.use_slot and hasattr(self.backbone, "forward_features"):
-            return self.backbone.forward_features(x)      # [B,C,H,W]
-        return self.backbone(x)                           # [B,num_cls] or [B,C,H,W]
+            for p in child.parameters():
+                p.requires_grad = False
+            SlotModel._freeze_layers(child, freeze_layer_num)
 
     def forward(self, x, target=None):
-        feats = self._backbone_features(x)
+        # ① 4-D feature-map 확보 ---------------------------------------------
+        if hasattr(self.backbone, "forward_features"):
+            feat = self.backbone.forward_features(x)   # (B,C,H,W)
+        else:                                          # odd custom backbone
+            feat = self.backbone(x)                    # hope it's 4-D
 
-        # ----------------- SLOT MODE -----------------------------------
+        # ② 이하 동일 ---------------------------------------------------------
         if self.use_slot:
-            self._ensure_conv1x1(feats)                   # <- 동적 생성/검증
-            feats = F.relu(self.conv1x1(feats), inplace=True)
+            feat = F.relu(self.conv1x1(feat))          # (B,D,H,W)
+            feat_pe = feat + self.position_emb(feat)
 
-            pos   = self.position_emb(feats)              # [B,C,H,W]
+            B, D, H, W = feat.shape
+            tokens    = feat   .flatten(2).transpose(1, 2)  # (B,H*W,D)
+            tokens_pe = feat_pe.flatten(2).transpose(1, 2)
 
-            B, C, H, W = feats.shape
-            feats_flat = feats.flatten(2).permute(0,2,1)  # [B,HW,C]
-            pos_flat   = pos  .flatten(2).permute(0,2,1)
-
-            logits, attn_loss = self.slot(pos_flat, feats_flat)
-            output = F.log_softmax(logits, dim=1)
-
-        # -------------- CLASSIFICATION-ONLY ---------------------------
+            logits, attn_loss = self.slot(tokens_pe, tokens)
         else:
-            output = F.log_softmax(feats, dim=1)
+            logits = feat.mean(dim=[2, 3])             # GAP
 
-        # -------------------------- LOSS ------------------------------
+        logp = F.log_softmax(logits, dim=1)
+
+        # ── 훈련
         if target is not None:
-            ce = F.nll_loss(output, target)
+            ce_loss = F.nll_loss(logp, target)
             if self.use_slot:
-                total = ce + self.lambda_value * attn_loss
-                return output, [total, ce, attn_loss]
-            return output, [ce]
+                loss = ce_loss + self.lambda_value * attn_loss
+                return logp, [loss, ce_loss, attn_loss]
+            return logp, [ce_loss]
 
-        return output
+        # ── 추론
+        return logp
