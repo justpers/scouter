@@ -20,14 +20,14 @@ class MakeList(object):
         for c_id, c in enumerate(self.category):
             print(c_id, '\t', c)
 
-        self.ration = ratio
+        self.ratio = ratio
 
     def get_data(self):
         all_data = []
         for img in self.all_image:
             label = self.deal_label(img)
             all_data.append([os.path.join(self.image_root, img), label])
-        train, val = train_test_split(all_data, random_state=1, train_size=self.ration)
+        train, val = train_test_split(all_data, random_state=1, train_size=self.ratio)
         return train, val
 
     def deal_label(self, img_name):
