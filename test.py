@@ -108,7 +108,7 @@ def main():
 
     if args.dataset == 'Blastocyst':
     # 🔸 시각화하고 싶은 클래스 지정 (예: class 1)
-        vis_target_class = 1
+        vis_target_class = 0
 
         # Blastocyst는 MakeListImage → ConText(index→(path,label)) 방식 사용
         train_list, val_list = MakeListImage(args).get_data()
