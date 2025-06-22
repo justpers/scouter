@@ -5,7 +5,6 @@ from torch.utils.data import DistributedSampler
 import tools.prepare_things as prt
 from engine import train_one_epoch, evaluate
 from dataset.choose_dataset import select_dataset
-#from tools.prepare_things import DataLoaderX
 from torch.utils.data import DataLoader
 from sloter.slot_model import SlotModel
 from tools.calculate_tool import MetricLog
