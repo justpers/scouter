@@ -28,7 +28,7 @@ def evaluate(model, data_loader, device, record=None, epoch=0):
         # 모델 출력 및 loss_list 가져오기
         outputs, loss_list = model(images, labels)
         loss = loss_list[0]
-        ce   = loss_list[1]
+        ce   = loss_list[1] if len(loss_list) > 1 else loss_list[0]
         att  = loss_list[2] if len(loss_list) > 2 else torch.tensor(0.0, device=device)
 
         preds = outputs.argmax(dim=1)
