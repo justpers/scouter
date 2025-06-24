@@ -61,20 +61,21 @@ def load_model(args, device):
 
 # -------------------------------------------------------------------
 def generate_exps(model, loader, device):
-    """
-    forward 할 때 save_id=(GT, LSC, save_dir, fname) 를 넘기면
-    SlotModel → SlotAttention 이 이미지별 PNG를 자동 저장합니다.
-    """
-    os.makedirs('exps/positive', exist_ok=True)   # loss_status>0 라고 가정
+    os.makedirs('exps/positive', exist_ok=True)
+
     with torch.no_grad():
         for batch in loader:
-            imgs, labels, names = batch['image'].to(device), batch['label'], batch['names']
-            for img, lab, path in zip(imgs, labels, names):
-                fname = os.path.splitext(os.path.basename(path))[0]
-                # 2-class 이므로 "가장 다른 클래스"도 lab 로 넣어둬도 무방
+            imgs, labels, paths = batch['image'].to(device), batch['label'], batch['names']
+
+            for img, lab, path in zip(imgs, labels, paths):
+                # ── <샘플ID> 추출 ───────────────────────────────
+                base_id = os.path.splitext(os.path.basename(path))[0].split('_')[0]
+                fname   = f"{base_id}_{lab.item()}"   # 예: 0054_0  또는 0054_1
+
+                # ── heat-map 생성 & 저장 ───────────────────────
                 _ = model(img.unsqueeze(0),
                           save_id=(lab.item(), lab.item(), 'exps', fname))
-
+                          
 # -------------------------------------------------------------------
 def area_size_only(val_loader, subdir):
     sizes = []
@@ -117,7 +118,7 @@ def main():
     if args.saliency:
         infid, sens = calc_infid_and_sens(
             model, val_loader,
-            exp_dir=exp_root,
+            exp_root,
             loss_status=args.loss_status,
             lsc_dict=None)          # Blastocyst → 불필요
         print(f'Infidelity={infid:.4f} | Sensitivity={sens:.4f}')
