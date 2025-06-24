@@ -19,7 +19,7 @@ from scipy.ndimage.filters import gaussian_filter
 from metrics.RISE.utils import get_class_name, tensor_imshow
 
 HW = 260 * 260  # image area
-n_classes = 100
+n_classes = 2
 
 
 def gkern(klen, nsig):
