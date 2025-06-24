@@ -58,7 +58,7 @@ class SlotAttention(nn.Module):
         self.initial_slots = nn.Parameter(torch.normal(mu, sigma))
 
         # ─────────────────── projections & GRU ───────────────────
-        self.to_q = nn.Linear(dim, dim)  # unused but kept for BC
+        self.to_q = nn.Sequential(nn.Linear(dim, dim))  # unused but kept for BC
 
         to_k: list[nn.Module] = [nn.Linear(dim, dim)]
         for _ in range(1, to_k_layer):
