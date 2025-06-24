@@ -7,3 +7,4 @@ data/
 .vscode/
 scripts/
 temp*
+*.png
