@@ -102,51 +102,51 @@ def get_exp_sens(X, model, expl, yy, sen_r, sen_N, norm):
     return max_diff
 
 
-def evaluate_infid_sen(loader, model, exp_path, loss_status, lsc_dict, pert, sen_r, sen_N):
-    if pert == "Gaussian":
-        binary_I = False
-    else:
+def evaluate_infid_sen(loader, model,
+                       exp_path, loss_status, lsc_dict,
+                       pert, sen_r, sen_N):
+    if pert != "Gaussian":
         raise NotImplementedError("Only support Gaussian perturbation.")
+    binary_I = False
 
     model.eval()
-    infids = []
-    max_sens = []
+    infids, max_sens = [], []
 
     for i, batch in enumerate(loader):
-        if i >= 50:  # i >= 50 for the experiments used in the paper
+        if i >= 50:                      # 논문 설정(최대 50장)
             break
 
-        X = batch["image"].cuda()
-        y = batch["label"].cuda()
+        X_all = batch["image"].cuda()    # (B,3,260,260)
+        y_all = batch["label"].cuda()    # (B,)
+        names = batch["names"]           # 길이 B 리스트
 
+        # 클래스 보정(negative-SCOUTER)
         if loss_status < 0:
-            # Calculate for the least similar class if negative SCOUTER.
-            y[0] = lsc_dict[str(y[0].item())]
+            y_all = torch.tensor([lsc_dict[str(y.item())] for y in y_all],
+                                 device=y_all.device)
 
-        if y.dim() == 2:
-            y = y.squeeze(1)
+        # ---- 이미지별로 루프 --------------------------------------
+        for img, yy, fname in zip(X_all, y_all, names):
+            # ① 예측 확률
+            with torch.no_grad():
+                pdt_val = model(img.unsqueeze(0))[:, yy].cpu().numpy()  # shape (1,)
 
-        # Obtain the model prediction.
-        pdt = model(X)[:, y]
-        pdt = pdt.data.cpu().numpy()
+            # ② 대응 saliency 파일 읽기
+            base_id = os.path.basename(fname)  # ex) 0054_0.png
+            expl = np.array(
+                Image.open(os.path.join(exp_path, base_id))
+                     .resize((260, 260), resample=Image.BILINEAR),
+                dtype=np.uint8
+            )
+            norm = np.linalg.norm(expl)
 
-        # Obtain the explanation image.
-        fname = os.path.basename(batch["names"][0])[:-5]  # Remove .JPEG extension.
-        expl = np.array(
-            Image.open(os.path.join(exp_path, fname + ".png")).resize((260, 260), resample=Image.BILINEAR),
-            dtype=np.uint8,
-        )
-        norm = np.linalg.norm(expl)
+            # ③ Infidelity / Sensitivity
+            infid = get_exp_infid(img, model, expl, yy, pdt_val,
+                                  binary_I=binary_I, pert=pert)
+            sens  = get_exp_sens(img, model, expl, yy,
+                                 sen_r, sen_N, norm)
 
-        # Calculate the infidelity and sensitivity.
-        with torch.no_grad():
-            infid = get_exp_infid(X, model, expl, y[0], pdt, binary_I=binary_I, pert=pert)
-            sens = get_exp_sens(X, model, expl, y[0], sen_r, sen_N, norm)
+            infids.append(infid)
+            max_sens.append(sens)
 
-        infids.append(infid)
-        max_sens.append(sens)
-
-    infid = np.mean(infids)
-    max_sen = np.mean(max_sens)
-
-    return infid, max_sen
+    return float(np.mean(infids)), float(np.mean(max_sens))

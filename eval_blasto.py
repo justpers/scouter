@@ -60,22 +60,36 @@ def load_model(args, device):
     return model
 
 # -------------------------------------------------------------------
-def generate_exps(model, loader, device):
-    os.makedirs('exps/positive', exist_ok=True)
+def generate_exps(model, loader, device, loss_status=1):
+    # 저장 폴더 준비
+    subdir   = "positive" if loss_status > 0 else "negative"
+    save_root = os.path.join("exps", subdir)
+    os.makedirs(save_root, exist_ok=True)
 
+    model.eval()
     with torch.no_grad():
         for batch in loader:
-            imgs, labels, paths = batch['image'].to(device), batch['label'], batch['names']
-
+            imgs, labels, paths = batch["image"].to(device), batch["label"], batch["names"]
             for img, lab, path in zip(imgs, labels, paths):
-                # ── <샘플ID> 추출 ───────────────────────────────
-                base_id = os.path.splitext(os.path.basename(path))[0].split('_')[0]
-                fname   = f"{base_id}_{lab.item()}"   # 예: 0054_0  또는 0054_1
+                # 1) 원본 파일명에서 확장자만 제거 (e.g. '0054_01.png' → '0054_01')
+                filename = os.path.basename(path)
+                base, _  = os.path.splitext(filename)
 
-                # ── heat-map 생성 & 저장 ───────────────────────
-                _ = model(img.unsqueeze(0),
-                          save_id=(lab.item(), lab.item(), 'exps', fname))
-                          
+                # 2) 이미 생성된 heat-map은 건너뛰기
+                out_path = os.path.join(save_root, base + ".png")
+                if os.path.exists(out_path):
+                    continue
+
+                # 3) SlotAttention 에게 저장 지시
+                # save_id = (GT_class, least_similar_class, root_dir, filename_without_ext)
+                lsc = 1 - lab.item()
+                _ = model(
+                    img.unsqueeze(0),         # (1,3,H,W)
+                    save_id=(lab.item(),      # GT class
+                             lsc,     
+                             "exps",          # 내부에서 subdir을 붙여 exps/positive 또는 exps/negative 로 저장
+                             base)            # 파일명 (확장자 제외)
+                )
 # -------------------------------------------------------------------
 def area_size_only(val_loader, subdir):
     sizes = []
@@ -97,7 +111,7 @@ def main():
     # ── heat-map 먼저 생성 ─────────────────────────────────────────
     if args.auc or args.saliency or args.area_prec:
         print('[Info] generating explanation images …')
-        generate_exps(model, val_loader, device)
+        generate_exps(model, val_loader, device, loss_status=args.loss_status)
 
     subdir = 'positive' if args.loss_status > 0 else 'negative'
     exp_root = f'exps/{subdir}'
@@ -116,12 +130,25 @@ def main():
 
     # ── Infidelity / Sensitivity ───────────────────────────────────
     if args.saliency:
-        infid, sens = calc_infid_and_sens(
+        if args.loss_status < 0:
+            lsc_dict = {"0": 1, "1": 0}
+        else:
+            lsc_dict = {}
+
+        infid_scores, sens_scores = calc_infid_and_sens(
             model, val_loader,
             exp_root,
             loss_status=args.loss_status,
-            lsc_dict=None)          # Blastocyst → 불필요
-        print(f'Infidelity={infid:.4f} | Sensitivity={sens:.4f}')
+            lsc_dict=lsc_dict)
+
+        # 평균값을 계산해서 출력하거나, 원한다면 dict 전체를 출력해도 됩니다.
+        avg_infid = sum(infid_scores.values()) / len(infid_scores)
+        avg_sens  = sum(sens_scores.values())  / len(sens_scores)
+        print(f'Infidelity={avg_infid:.4f} | Sensitivity={avg_sens:.4f}')
+
+        # (선택) 개별 perturbation별 점수를 보고 싶다면:
+        print('Infidelity per pert:', infid_scores)
+        print('Sensitivity per pert:', sens_scores)
 
     # ── Area-size (precision 제외) ─────────────────────────────────
     if args.area_prec:

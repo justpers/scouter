@@ -176,7 +176,13 @@ class CausalMetric:
             # Change specified number of most salient pixels to substrate pixels
             coords = salient_order[:, self.step * i : self.step * (i + 1)]
             row_indices, col_indices = np.unravel_index(coords, exp_batch.shape[1:])
-            start[r, :, row_indices, col_indices] = finish[r, :, row_indices, col_indices]
+            valid_n = row_indices.shape[0]
+
+            for b in range(valid_n):
+                ri = row_indices[b]
+                ci = col_indices[b]
+                start[b, :, ri, ci] = finish[b, :, ri, ci]
+
 
         print("AUC: {}".format(auc(scores.mean(1))))
         return scores
