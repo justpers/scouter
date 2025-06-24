@@ -221,7 +221,8 @@ class SlotModel(nn.Module):
             if self.use_slot:
                 total_loss = ce_loss + self.lambda_value * attn_loss
                 return output, [total_loss, ce_loss, attn_loss]
-            return output, [ce_loss]
+            else:
+                return output, [ce_loss, ce_loss]
 
         # ── Inference mode ─────────────────────────────────────────────────
         return output
