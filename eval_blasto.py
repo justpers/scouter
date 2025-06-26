@@ -82,13 +82,16 @@ def generate_exps(model, loader, device, loss_status=1):
 
                 # 3) SlotAttention 에게 저장 지시
                 # save_id = (GT_class, least_similar_class, root_dir, filename_without_ext)
-                lsc = 1 - lab.item()
+                if loss_status > 0:
+                    # positive 모델: GT 슬롯만 저장
+                    save_id = (lab.item(), lab.item(), "exps", base)
+                else:
+                    # negative 모델: positive/negative 모두 필요
+                    lsc = 1 - lab.item()
+                    save_id = (lab.item(), lsc, "exps", base)
                 _ = model(
                     img.unsqueeze(0),         # (1,3,H,W)
-                    save_id=(lab.item(),      # GT class
-                             lsc,     
-                             "exps",          # 내부에서 subdir을 붙여 exps/positive 또는 exps/negative 로 저장
-                             base)            # 파일명 (확장자 제외)
+                    save_id=save_id
                 )
 # -------------------------------------------------------------------
 def area_size_only(val_loader, subdir):
