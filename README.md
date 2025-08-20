@@ -9,7 +9,6 @@
 > Used for **reproduction and embryo dataset experiments**.  
 > 
 > - Original Paper: ICCV 2021  
-> - License: MIT  
 > 
 > ### My Contributions
 > - Implemented evaluation metrics (accuracy, precision, recall, F1, IAUC, DAUC, Sensitivity, Infidelity)  
