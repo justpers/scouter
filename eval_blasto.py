@@ -28,24 +28,24 @@ def build_parser():
     p.set_defaults(dataset='Blastocyst',
                    num_classes=2,
                    img_size=260,
-                   batch_size=8,
+                   batch_size=16,
                    use_slot=True,        # 반드시 slot 모델
                    pre_trained=False,
-                   vis=True,             # ★ heat-map 자동 저장
+                   vis=True,             # heat-map 자동 저장
                    device='cuda')
     return p
 
 
 # -------------------------------------------------------------------
 def get_val_loader(args):
-    train, val = MakeListImage(args).get_data()
+    train, val, test = MakeListImage(args).get_data()
     tf = transforms.Compose([
         transforms.Resize((args.img_size, args.img_size)),
         transforms.ToTensor(),
         transforms.Normalize([0.485,0.456,0.406],
                              [0.229,0.224,0.225])
     ])
-    ds = ConText(val, transform=tf)
+    ds = ConText(test, transform=tf)
     return torch.utils.data.DataLoader(
         ds, batch_size=args.batch_size,
         shuffle=False, num_workers=1, pin_memory=True)
@@ -94,13 +94,17 @@ def generate_exps(model, loader, device, loss_status=1):
                     save_id=save_id
                 )
 # -------------------------------------------------------------------
-def area_size_only(val_loader, subdir):
+def area_size_only(loader, subdir):
     sizes = []
-    for batch in val_loader:
-        fname = os.path.splitext(os.path.basename(batch['names'][0]))[0]
-        path = f'sloter/vis/{subdir}/{fname}.png'
-        if os.path.exists(path):
-            sizes.append(calc_area_size(Image.open(path)))
+    for batch in loader:
+        for name in batch['names']:
+            fname = os.path.splitext(os.path.basename(name))[0]
+            # 경로 후보: exp_dir 우선, 없으면 sloter/vis 
+            cand1 = os.path.join("exps", subdir, f"{fname}.png")
+            cand2 = os.path.join('sloter', 'vis', subdir, f"{fname}.png")
+            path = cand1 if os.path.exists(cand1) else (cand2 if os.path.exists(cand2) else None)
+            if path is not None:
+                sizes.append(calc_area_size(Image.open(path)))
     return sum(sizes)/len(sizes) if sizes else None
 
 # -------------------------------------------------------------------
@@ -149,7 +153,7 @@ def main():
         avg_sens  = sum(sens_scores.values())  / len(sens_scores)
         print(f'Infidelity={avg_infid:.4f} | Sensitivity={avg_sens:.4f}')
 
-        # (선택) 개별 perturbation별 점수를 보고 싶다면:
+        # 개별 perturbation별 점수를 보고 싶다면:
         print('Infidelity per pert:', infid_scores)
         print('Sensitivity per pert:', sens_scores)
 
