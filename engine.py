@@ -14,90 +14,98 @@ def train_one_epoch(model, data_loader, optimizer, device, record, epoch):
 def evaluate(model, data_loader, device, record=None, epoch=0):
     model.eval()
 
-    total_loss = 0.0
-    total_correct = 0
-    total_samples = 0
-    total_log = 0.0       # ← CE loss 누적
-    total_att = 0.0       # ← attention loss 누적
+    total_loss = total_ce = total_att = 0.0
+    total_correct = total_samples = 0
     all_probs, all_labels = [], []
 
     for batch in data_loader:
         images = batch["image"].to(device).float()
         labels = batch["label"].to(device)
+        bsz = labels.size(0)
 
-        # 모델 출력 및 loss_list 가져오기
         outputs, loss_list = model(images, labels)
-        loss = loss_list[0]
-        ce   = loss_list[1]
-        att  = loss_list[2] if len(loss_list) > 2 else torch.tensor(0.0, device=device)
+        total_ = loss_list[0]
+        ce     = loss_list[1] if len(loss_list) >= 2 else F.cross_entropy(outputs, labels)
+        att    = loss_list[2] if len(loss_list) >= 3 else 0.0
 
         preds = outputs.argmax(dim=1)
 
-        total_loss    += loss.item() * images.size(0)
-        total_log     += ce.item()   * images.size(0)
-        total_att     += att.item()  * images.size(0)
+        total_loss += float(total_.item()) * bsz
+        total_ce   += float(ce.item()     if hasattr(ce, "item") else ce) * bsz
+        total_att  += float(att.item()    if hasattr(att, "item") else att) * bsz
         total_correct += (preds == labels).sum().item()
-        total_samples += images.size(0)
+        total_samples += bsz
 
-        probs = torch.softmax(outputs, dim=1)[:, 1]  # binary 분류 가정
-        all_probs.extend(probs.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
+        probs = torch.softmax(outputs, dim=1)[:, 1]
+        all_probs.extend(probs.detach().cpu().numpy())
+        all_labels.extend(labels.detach().cpu().numpy())
 
-    avg_loss = total_loss / total_samples
-    avg_ce   = total_log  / total_samples
-    avg_att  = total_att  / total_samples
-    acc      = total_correct / total_samples
-    auc      = roc_auc_score(all_labels, all_probs)
+    avg_loss = total_loss / max(1, total_samples)
+    avg_ce   = total_ce   / max(1, total_samples)
+    avg_att  = total_att  / max(1, total_samples)
+    acc      = total_correct / max(1, total_samples)
+
+    try:
+        auc = roc_auc_score(all_labels, all_probs)
+    except Exception:
+        auc = float("nan")
 
     if record is not None:
-        # 기존 train_one_epoch() 에서 사용하는 "log_loss" / "att_loss" 키와 동일하게 사용해야 저장됨
         for k in ["loss", "log_loss", "att_loss", "acc", "auc"]:
             if k not in record["val"]:
                 record["val"][k] = []
         record["val"]["loss"].append(round(avg_loss, 3))
-        record["val"]["log_loss"].append(round(avg_ce, 3))   # CE 손실
-        record["val"]["att_loss"].append(round(avg_att, 3))  # attention 손실
+        record["val"]["log_loss"].append(round(avg_ce, 3))
+        record["val"]["att_loss"].append(round(avg_att, 3))
         record["val"]["acc"].append(round(acc, 3))
         record["val"]["auc"].append(round(auc, 4))
 
     return {"loss": avg_loss, "ce": avg_ce, "att": avg_att, "acc": acc, "auc": auc}
 
 def calculation(model, mode, data_loader, device, record, epoch, optimizer=None):
-    L = len(data_loader)
-    running_loss = 0.0
-    running_corrects = 0.0
-    running_att_loss = 0.0
-    running_log_loss = 0.0
+    from torch.nn import functional as F
     print("start " + mode + " :" + str(epoch))
-    for i_batch, sample_batch in enumerate(tqdm(data_loader)):
+
+    total_loss = total_ce = total_att = 0.0
+    total_correct = total_samples = 0
+
+    for sample_batch in tqdm(data_loader):
         inputs = sample_batch["image"].to(device, dtype=torch.float32)
         labels = sample_batch["label"].to(device, dtype=torch.int64)
+        bsz = labels.size(0)
 
         if mode == "train":
             optimizer.zero_grad()
-        logits, loss_list = model(inputs, labels)
-        loss = loss_list[0]
+
+        outputs, loss_list = model(inputs, labels)
+        # total / ce / att 안전 추출
+        total = loss_list[0]
+        ce    = loss_list[1] if len(loss_list) >= 2 else F.cross_entropy(outputs, labels)
+        att   = loss_list[2] if len(loss_list) >= 3 else 0.0
+
         if mode == "train":
-            loss.backward()
-            # clip_gradient(optimizer, 1.1)
+            total.backward()
             optimizer.step()
 
-        a = loss.item()
-        running_loss += a
-        if len(loss_list) > 2: # For slot training only
-            running_att_loss += loss_list[2].item()
-            running_log_loss += loss_list[1].item()
-        running_corrects += cal.evaluateTop1(logits, labels)
-        # if i_batch % 10 == 0:
-        #     print("epoch: {} {}/{} Loss: {:.4f}".format(epoch, i_batch, L-1, a))
-    epoch_loss = round(running_loss/L, 3)
-    epoch_loss_log = round(running_log_loss/L, 3)
-    epoch_loss_att = round(running_att_loss/L, 3)
-    epoch_acc = round(running_corrects/L, 3)
+        # 가중 합(배치 크기만큼 곱해서)
+        total_loss += float(total.item()) * bsz
+        total_ce   += float(ce.item()   if hasattr(ce, "item") else ce) * bsz
+        total_att  += float(att.item()  if hasattr(att, "item") else att) * bsz
+
+        preds = outputs.argmax(dim=1)
+        total_correct += (preds == labels).sum().item()
+        total_samples += bsz
+
+    # 배치 크기 가중 평균
+    epoch_loss = round(total_loss / max(1, total_samples), 3)
+    epoch_ce   = round(total_ce   / max(1, total_samples), 3)
+    epoch_att  = round(total_att  / max(1, total_samples), 3)
+    epoch_acc  = round(total_correct / max(1, total_samples), 3)
+
     record[mode]["loss"].append(epoch_loss)
     record[mode]["acc"].append(epoch_acc)
-    record[mode]["log_loss"].append(epoch_loss_log)
-    record[mode]["att_loss"].append(epoch_loss_att)
+    record[mode]["log_loss"].append(epoch_ce)
+    record[mode]["att_loss"].append(epoch_att)
 
 
 def clip_gradient(optimizer, grad_clip):
