@@ -115,13 +115,15 @@ def main(args):
     )
 
     # 5) 데이터셋 및 DataLoader
-    dataset_train, dataset_val = select_dataset(args)
+    dataset_train, dataset_val, dataset_test = select_dataset(args)
     if args.distributed:
         sampler_train = DistributedSampler(dataset_train)
         sampler_val   = DistributedSampler(dataset_val, shuffle=False)
+        sampler_test = DistributedSampler(dataset_test, shuffle=False)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val   = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_test = torch.utils.data.SequentialSampler(dataset_test)
 
     data_loader_train = DataLoader(
         dataset_train,
@@ -134,6 +136,12 @@ def main(args):
         dataset_val,
         batch_size=args.batch_size,
         sampler=sampler_val,
+        num_workers=args.num_workers
+    )
+    data_loader_test = DataLoader(
+        dataset_test,
+        batch_size=args.batch_size,
+        sampler=sampler_test,
         num_workers=args.num_workers
     )
 
@@ -218,6 +226,20 @@ def main(args):
 
     total_time = time.time() - tic
     print("Total training time:", str(datetime.timedelta(seconds=int(total_time))))
+
+    # 최종 test 평가 (best.pth 로드 후 한번만 진행함)
+    best_path = output_dir / 'best.pth'
+    if best_path.exists():
+        best_ckpt = torch.load(best_path, map_location='cpu')
+        model_without_ddp.load_state_dict(best_ckpt['model'])
+        print(f"Loaded best.pth (epoch={best_ckpt['epoch']}, "
+              f"val_acc={best_ckpt.get('best_acc', float('nan')):.4f})")
+    else:
+        print("best.pth가 없음. 현재 가중치로 test 진행함")
+    
+    model.eval()
+    test_res = evaluate(model, data_loader_test, device, record, epoch='final')
+    print(f"[TEST] acc={test_res['acc']:.4f}  auc={test_res['auc']:.4f}  loss={test_res['loss']:.4f}")
 # ---------------------------------------------------------------
 # 3. Entrypoint
 # ---------------------------------------------------------------
