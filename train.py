@@ -30,7 +30,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('Set SCOUTER model', add_help=False)
     parser.add_argument('--model', default="resnet18", type=str)
     parser.add_argument('--dataset', default="MNIST", type=str)
-    parser.add_argument('--channel', default=512, type=int)
+    parser.add_argument('--channel', default=512, type=int)  # slot 안 쓰는 현재 파일에선 해당 x
 
     # training set
     parser.add_argument('--lr', default=0.0001, type=float)
