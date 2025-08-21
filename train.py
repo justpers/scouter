@@ -17,7 +17,6 @@ import gc
 from sklearn.metrics import roc_auc_score
 import random
 
-
 def get_args_parser():
     def str2bool(v):
         if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -139,7 +138,7 @@ def main(args):
     )
     data_loader_test= DataLoader(
         dataset_test,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         sampler=sampler_test,
         num_workers=args.num_workers
     )
