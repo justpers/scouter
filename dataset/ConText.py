@@ -40,31 +40,32 @@ class MakeListImage():
     """
     this class used to make list of data for ImageNet
     """
+    # Blastocyst 데이터셋 test 폴더 사용하도록 수정
     def __init__(self, args):
         self.image_root = args.dataset_dir
         train_dir = os.path.join(self.image_root, "train")
         self.category = get_name(train_dir) or []
         self.used_cat = self.category[:args.num_classes]
-        # for c_id, c in enumerate(self.used_cat):
-        #     print(c_id, '\t', c)
 
     def get_data(self):
         train = self.get_img(self.used_cat, "train")
-        val = self.get_img(self.used_cat, "val")
-        return train, val
+        val   = self.get_img(self.used_cat, "val")
+        test  = self.get_img(self.used_cat, "test")
+        return train, val, test
 
     def get_img(self, folders, phase):
         record = []
-        for folder in folders:
-            current_root = os.path.join(self.image_root, phase, folder)
-            images = get_name(current_root, mode_folder=False)
-            for img in images:
-                record.append([os.path.join(current_root, img), self.deal_label(folder)])
+        root_phase = os.path.join(self.image_root, phase)
+        if not os.path.isdir(root_phase):
+            return record
+        for cls in folders:
+            cls_dir = os.path.join(root_phase, cls)
+            for img in get_name(cls_dir, mode_folder=False):
+                record.append([os.path.join(cls_dir, img), self.deal_label(cls)])
         return record
 
-    def deal_label(self, img_name):
-        back = self.used_cat.index(img_name)
-        return back
+    def deal_label(self, cls_name):
+        return self.used_cat.index(cls_name)
 
 
 class ConText(Dataset):
