@@ -87,31 +87,12 @@ def main():
                              [0.229, 0.224, 0.225])
     ])
 
-    # if args.dataset == 'Blastocyst':
-    #     # Blastocyst는 MakeListImage → ConText(index→(path,label)) 방식 사용
-    #     train_list, val_list = MakeListImage(args).get_data()
-    #     dataset_val = ConText(train_list, transform=base_transform)
-    #     data_loader_val = torch.utils.data.DataLoader(
-    #         dataset_val, batch_size=args.batch_size,
-    #         shuffle=False, num_workers=1, pin_memory=True
-    #     )
-    #     # 첫 번째 배치에서 이미지 한 장과 레이블을 추출
-    #     batch = next(iter(data_loader_val))
-    #     image_tensor = batch["image"][3]      # 아직 Normalize 적용 전(Tensor([0,1]) 범위)
-    #     label = batch["label"][3].item()
-    #     image_orig = Image.fromarray(
-    #         (image_tensor.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8),
-    #         mode='RGB'
-    #     )
-    #     # 정규화 적용
-    #     image_tensor = norm_transform(image_tensor)
-
     if args.dataset == 'Blastocyst':
     # 🔸 시각화하고 싶은 클래스 지정 (예: class 1)
         vis_target_class = 1
 
         # Blastocyst는 MakeListImage → ConText(index→(path,label)) 방식 사용
-        train_list, val_list = MakeListImage(args).get_data()
+        train_list, val_list, test_list = MakeListImage(args).get_data()
         dataset_val = ConText(train_list, transform=base_transform)
         data_loader_val = torch.utils.data.DataLoader(
             dataset_val, batch_size=args.batch_size,
