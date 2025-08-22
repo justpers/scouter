@@ -12,6 +12,8 @@ from metrics.IAUC_DAUC import calc_iauc_and_dauc_batch
 from metrics.saliency_evaluation.eval_infid_sen import calc_infid_and_sens
 from metrics.area_size import calc_area_size
 
+from torch.cuda.amp import autocast
+
 # -------------------------------------------------------------------
 def build_parser():
     p = argparse.ArgumentParser('Blastocyst-slot evaluation',
@@ -48,7 +50,7 @@ def get_val_loader(args):
     ds = ConText(test, transform=tf)
     return torch.utils.data.DataLoader(
         ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=1, pin_memory=True)
+        shuffle=False, num_workers=0, pin_memory=False)
 
 
 # -------------------------------------------------------------------
@@ -60,39 +62,53 @@ def load_model(args, device):
     return model
 
 # -------------------------------------------------------------------
-def generate_exps(model, loader, device, loss_status=1):
+def generate_exps(model, loader, device, loss_status=1, flush_every=32):
     # 저장 폴더 준비
     subdir   = "positive" if loss_status > 0 else "negative"
     save_root = os.path.join("exps", subdir)
     os.makedirs(save_root, exist_ok=True)
 
     model.eval()
+    processed = 0
+
     with torch.no_grad():
         for batch in loader:
-            imgs, labels, paths = batch["image"].to(device), batch["label"], batch["names"]
-            for img, lab, path in zip(imgs, labels, paths):
-                # 1) 원본 파일명에서 확장자만 제거 (e.g. '0054_01.png' → '0054_01')
+            # 수정: 배치는 CPU에 두고, 이미지 하나씩 GPU로 이동
+            imgs, labels, paths = batch["image"], batch["label"], batch["names"]
+
+            for img_cpu, lab, path in zip(imgs, labels, paths):
+                # 1) 파일명 처리
                 filename = os.path.basename(path)
                 base, _  = os.path.splitext(filename)
 
-                # 2) 이미 생성된 heat-map은 건너뛰기
+                # 2) 이미 생성된 heat-map은 건너뜀
                 out_path = os.path.join(save_root, base + ".png")
                 if os.path.exists(out_path):
                     continue
 
-                # 3) SlotAttention 에게 저장 지시
-                # save_id = (GT_class, least_similar_class, root_dir, filename_without_ext)
+                # 3) SlotAttention 저장 지시
                 if loss_status > 0:
-                    # positive 모델: GT 슬롯만 저장
                     save_id = (lab.item(), lab.item(), "exps", base)
                 else:
-                    # negative 모델: positive/negative 모두 필요
-                    lsc = 1 - lab.item()
+                    lsc     = 1 - lab.item()
                     save_id = (lab.item(), lsc, "exps", base)
-                _ = model(
-                    img.unsqueeze(0),         # (1,3,H,W)
-                    save_id=save_id
-                )
+
+                # 이미지 하나만 GPU로 올림
+                img = img_cpu.to(device, non_blocking=True)
+
+                # AMP로 메모리/연산량 절감
+                with autocast(enabled=torch.cuda.is_available()):
+                    out = model(img.unsqueeze(0), save_id=save_id)
+
+                # 임시 텐서/참조 해제
+                del out, img
+                processed += 1
+
+                # 주기적으로 캐시 비우기
+                if torch.cuda.is_available() and (processed % flush_every == 0):
+                    torch.cuda.empty_cache()
+                    # 선택: 동기화로 누수 의심 시점 정리
+                    # torch.cuda.synchronize()
 # -------------------------------------------------------------------
 def area_size_only(loader, subdir):
     sizes = []
@@ -111,14 +127,16 @@ def area_size_only(loader, subdir):
 def main():
     args   = build_parser().parse_args()
     device = torch.device(args.device)
-
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+        
     val_loader = get_val_loader(args)
     model      = load_model(args, device)
 
     # ── heat-map 먼저 생성 ─────────────────────────────────────────
     if args.auc or args.saliency or args.area_prec:
         print('[Info] generating explanation images …')
-        generate_exps(model, val_loader, device, loss_status=args.loss_status)
+        generate_exps(model, val_loader, device, loss_status=args.loss_status, flush_every=32)
 
     subdir = 'positive' if args.loss_status > 0 else 'negative'
     exp_root = f'exps/{subdir}'
