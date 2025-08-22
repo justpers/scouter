@@ -41,7 +41,7 @@ def get_args_parser():
     parser.add_argument('--weight_decay', default=0.0001, type=float)
     parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument("--num_classes", default=2, type=int)
-    parser.add_argument('--img_size', default=260, help='path for save data')
+    parser.add_argument('--img_size', default=260, type=int, help='path for save data')
     parser.add_argument('--pre_trained', default=True, type=str2bool, help='whether use pre parameter for backbone')
     parser.add_argument('--use_slot', default=True, type=str2bool, help='whether use slot module')
     parser.add_argument('--use_pre', default=False, type=str2bool, help='whether use pre dataset parameter')
